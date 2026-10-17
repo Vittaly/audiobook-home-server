@@ -49,9 +49,109 @@ data class ChapterOut(
     val stream_url: String,
 )
 
+/** Краткое представление книги (тома) внутри карточки раздачи. */
+@JsonClass(generateAdapter = true)
+data class ReleaseBookOut(
+    val id: Int,
+    val ordinal: Int,
+    val title: String,
+    val folder: String? = null,
+    val series: SeriesRef? = null,
+    val status: BookStatus,
+    val chapters_count: Int = 0,
+    val chapters_ready: Int = 0,
+    val total_duration_sec: Int? = null,
+    val size_bytes: Long? = null,
+    val cover_url: String? = null,
+    val cover_is_temp: Boolean = false,
+    val last_accessed: String? = null,
+)
+
+/** Книга (том) внутри карточки раздачи с главами (ReleaseBookOut + chapters). */
+@JsonClass(generateAdapter = true)
+data class ReleaseBookDetailOut(
+    val id: Int,
+    val ordinal: Int,
+    val title: String,
+    val folder: String? = null,
+    val series: SeriesRef? = null,
+    val status: BookStatus,
+    val chapters_count: Int = 0,
+    val chapters_ready: Int = 0,
+    val total_duration_sec: Int? = null,
+    val size_bytes: Long? = null,
+    val cover_url: String? = null,
+    val cover_is_temp: Boolean = false,
+    val last_accessed: String? = null,
+    val chapters: List<ChapterOut> = emptyList(),
+)
+
+/** Карточка раздачи для списков. */
+@JsonClass(generateAdapter = true)
+data class ReleaseOut(
+    val id: Int,
+    val title: String,
+    val title_raw: String? = null,
+    val author: String? = null,
+    val narrator: String? = null,
+    val year: Int? = null,
+    val language: String? = null,
+    val description: String? = null,
+    val rubrics: List<String> = emptyList(),
+    val status: BookStatus,
+    val content_type: String = "single",
+    val books_count: Int = 0,
+    val books_ready: Int = 0,
+    val chapters_count: Int = 0,
+    val chapters_ready: Int = 0,
+    val total_duration_sec: Int? = null,
+    val size_bytes: Long? = null,
+    val cover_url: String? = null,
+    val added_at: String,
+    val downloaded_at: String? = null,
+    val last_accessed: String? = null,
+)
+
+/** Полная карточка раздачи с персонами и книгами. */
+@JsonClass(generateAdapter = true)
+data class ReleaseDetailOut(
+    val id: Int,
+    val title: String,
+    val title_raw: String? = null,
+    val author: String? = null,
+    val narrator: String? = null,
+    val year: Int? = null,
+    val language: String? = null,
+    val description: String? = null,
+    val rubrics: List<String> = emptyList(),
+    val status: BookStatus,
+    val content_type: String = "single",
+    val books_count: Int = 0,
+    val books_ready: Int = 0,
+    val chapters_count: Int = 0,
+    val chapters_ready: Int = 0,
+    val total_duration_sec: Int? = null,
+    val size_bytes: Long? = null,
+    val cover_url: String? = null,
+    val added_at: String,
+    val downloaded_at: String? = null,
+    val last_accessed: String? = null,
+    val persons: List<PersonRef> = emptyList(),
+    val books: List<ReleaseBookDetailOut> = emptyList(),
+)
+
+@JsonClass(generateAdapter = true)
+data class ReleaseListResponse(
+    val items: List<ReleaseOut>,
+    val total: Int,
+    val limit: Int,
+    val offset: Int,
+)
+
 @JsonClass(generateAdapter = true)
 data class BookOut(
     val id: Int,
+    val ordinal: Int = 1,
     val title: String,
     val author: String? = null,
     val narrator: String? = null,
@@ -60,11 +160,12 @@ data class BookOut(
     val series: SeriesRef? = null,
     val rubrics: List<String> = emptyList(),
     val status: BookStatus,
-    val chapters_count: Int,
-    val chapters_ready: Int,
+    val chapters_count: Int = 0,
+    val chapters_ready: Int = 0,
     val total_duration_sec: Int? = null,
     val size_bytes: Long? = null,
     val cover_url: String? = null,
+    val cover_is_temp: Boolean = false,
     val added_at: String,
     val last_accessed: String? = null,
 )
@@ -72,6 +173,7 @@ data class BookOut(
 @JsonClass(generateAdapter = true)
 data class BookDetailOut(
     val id: Int,
+    val ordinal: Int = 1,
     val title: String,
     val author: String? = null,
     val narrator: String? = null,
@@ -80,11 +182,12 @@ data class BookDetailOut(
     val series: SeriesRef? = null,
     val rubrics: List<String> = emptyList(),
     val status: BookStatus,
-    val chapters_count: Int,
-    val chapters_ready: Int,
+    val chapters_count: Int = 0,
+    val chapters_ready: Int = 0,
     val total_duration_sec: Int? = null,
     val size_bytes: Long? = null,
     val cover_url: String? = null,
+    val cover_is_temp: Boolean = false,
     val added_at: String,
     val last_accessed: String? = null,
     val title_raw: String? = null,
@@ -106,6 +209,8 @@ data class HealthOut(
     val status: String,
     val db: String,
     val uptime_sec: Int,
+    val mode: String? = null,
+    val torrent_client: String? = null,
 )
 
 @JsonClass(generateAdapter = true)
@@ -138,6 +243,7 @@ data class ChapterProgressOut(
 @JsonClass(generateAdapter = true)
 data class DownloadStatusOut(
     val book_id: Int,
+    val release_id: Int? = null,
     val status: BookStatus,
     val client_state: String? = null,
     val progress: Float,

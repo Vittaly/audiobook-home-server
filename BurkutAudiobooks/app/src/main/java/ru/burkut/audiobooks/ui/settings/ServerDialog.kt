@@ -42,7 +42,7 @@ import ru.burkut.audiobooks.ui.viewModelFactoryOf
 
 @Composable
 fun ServerDialog(
-    currentUrl: String,
+    currentUrl: String?,
     onConnected: () -> Unit,
     onDisconnected: () -> Unit,
     onDismiss: () -> Unit,
@@ -79,7 +79,10 @@ fun ServerDialog(
                 Text("Сервер", style = MaterialTheme.typography.titleLarge)
 
                 if (mode == "info") {
-                    Text(currentUrl, style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        currentUrl ?: "Сервер не настроен — по умолчанию идёт авто-поиск.",
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = { mode = "search" }) {
                             Text("Найти заново")

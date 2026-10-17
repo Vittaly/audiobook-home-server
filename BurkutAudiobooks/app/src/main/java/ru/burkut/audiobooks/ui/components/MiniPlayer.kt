@@ -3,11 +3,9 @@ package ru.burkut.audiobooks.ui.components
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
@@ -21,13 +19,13 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import ru.burkut.audiobooks.R
 import ru.burkut.audiobooks.player.PlayerViewModel
-import ru.burkut.audiobooks.ui.util.formatDurationMs
 
 @Composable
 fun MiniPlayer(
@@ -50,7 +48,9 @@ fun MiniPlayer(
             AsyncImage(
                 model = state.artUri,
                 contentDescription = null,
-                modifier = Modifier.size(40.dp),
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(8.dp)),
             )
             Column(modifier = Modifier.weight(1f).padding(start = 10.dp)) {
                 Text(
@@ -59,13 +59,23 @@ fun MiniPlayer(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                state.fileName?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 LinearProgressIndicator(
                     progress = {
-                        if (state.durationMs > 0) {
-                            (state.positionMs.toFloat() / state.durationMs).coerceIn(0f, 1f)
+                        if (state.bookDurationMs > 0) {
+                            (state.bookPositionMs.toFloat() / state.bookDurationMs).coerceIn(0f, 1f)
                         } else 0f
                     },
                     modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    strokeCap = androidx.compose.ui.graphics.StrokeCap.Butt,
                 )
             }
             IconButton(onClick = playerVm::togglePlayPause) {

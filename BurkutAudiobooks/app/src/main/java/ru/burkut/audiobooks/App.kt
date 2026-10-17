@@ -2,20 +2,21 @@ package ru.burkut.audiobooks
 
 import android.app.Application
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.database.StandaloneDatabaseProvider
-import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
-import androidx.media3.datasource.cache.SimpleCache
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import ru.burkut.audiobooks.data.BookRepository
+import ru.burkut.audiobooks.data.ServerMonitor
 import ru.burkut.audiobooks.data.api.ApiProvider
 import ru.burkut.audiobooks.data.db.AppDatabase
 import ru.burkut.audiobooks.data.settings.Settings
-import ru.burkut.audiobooks.player.BookDownloads
-import ru.burkut.audiobooks.player.DownloadObserver
-import ru.burkut.audiobooks.player.createDownloads
-import java.io.File
+import ru.burkut.audiobooks.notifications.BookNotificationHelper
+import ru.burkut.audiobooks.player.BookStorage
+import ru.burkut.audiobooks.player.DownloadQueue
+import ru.burkut.audiobooks.player.LocalBookDataSourceFactory
 
 class App : Application() {
 
@@ -31,16 +32,23 @@ class App : Application() {
     lateinit var repository: BookRepository
         private set
 
-    lateinit var simpleCache: SimpleCache
+    lateinit var storage: BookStorage
         private set
 
-    lateinit var bookDownloads: BookDownloads
+    lateinit var downloadQueue: DownloadQueue
         private set
 
-    lateinit var downloadObserver: DownloadObserver
+    lateinit var serverMonitor: ServerMonitor
         private set
 
-    private lateinit var databaseProvider: StandaloneDatabaseProvider
+    lateinit var notificationHelper: BookNotificationHelper
+        private set
+
+    /** DataSource.Factory для локальных файлов книг (распознаёт URI /books/{id}/{ordinal}.mp3). */
+    lateinit var localDataSourceFactory: LocalBookDataSourceFactory
+        private set
+
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     @OptIn(UnstableApi::class)
     override fun onCreate() {
@@ -50,35 +58,50 @@ class App : Application() {
         //    должен работать из любого места процесса сразу после этого.
         install(this)
 
-        // 2. Остальная инициализация — как было.
+        // 2. Остальная инициализация.
         settings = Settings(this)
         db = AppDatabase.get(this)
         apiProvider = ApiProvider(settings)
-        repository = BookRepository(apiProvider, db.playbackDao())
+        repository = BookRepository(apiProvider, db.playbackDao(), db.catalogDao())
 
-        databaseProvider = StandaloneDatabaseProvider(this)
-        simpleCache = SimpleCache(
-            File(filesDir, "audio-cache"),
-            LeastRecentlyUsedCacheEvictor(MAX_CACHE_BYTES),
-            databaseProvider,
-        )
+        storage = BookStorage(this)
+        downloadQueue = DownloadQueue(repository, storage)
+        notificationHelper = BookNotificationHelper(this)
+        localDataSourceFactory = LocalBookDataSourceFactory { bookId, ordinal ->
+            storage.playbackFile(bookId, ordinal)
+        }
 
-        val downloadManager = createDownloads(this, databaseProvider, simpleCache)
-        downloadObserver = DownloadObserver(downloadManager)
-        bookDownloads = BookDownloads(downloadManager)
+        serverMonitor = ServerMonitor(this, settings, repository)
+
+        storage.migrateAndClean(this)
+
+        // При появлении доступа к серверу качаем раздачи, поставленные в очередь оффлайн.
+        serverMonitor.onServerOnline = { baseUrl ->
+            appScope.launch {
+                downloadQueue.setServerAvailable(true)
+                val queued = repository.getQueuedReleases()
+                for (release in queued) {
+                    downloadQueue.enqueueRelease(release.id, baseUrl)
+                }
+            }
+        }
+
+        // «Книга готова» — уведомление по завершении загрузки книги на устройство.
+        appScope.launch {
+            downloadQueue.onBookReady.collect { pair ->
+                pair?.let { (_, title) -> notificationHelper.notifyBookReady(title) }
+            }
+        }
+
+        serverMonitor.start()
     }
 
+    /** MediaSource.Factory для локальных файлов — используется PlayerService. */
     @OptIn(UnstableApi::class)
-    fun mediaSourceFactory(): DefaultMediaSourceFactory =
-        DefaultMediaSourceFactory(
-            CacheDataSource.Factory()
-                .setCache(simpleCache)
-                .setUpstreamDataSourceFactory(DefaultHttpDataSource.Factory()),
-        )
+    fun localMediaSourceFactory(): MediaSource.Factory =
+        ProgressiveMediaSource.Factory(localDataSourceFactory)
 
     companion object {
-        private const val MAX_CACHE_BYTES = 512L * 1024 * 1024
-
         @Volatile
         private var _instance: App? = null
 

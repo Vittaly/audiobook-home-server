@@ -22,8 +22,8 @@ import ru.burkut.audiobooks.ui.catalog.CatalogScreen
 import ru.burkut.audiobooks.ui.components.MiniPlayer
 import ru.burkut.audiobooks.ui.detail.BookDetailScreen
 import ru.burkut.audiobooks.ui.player.PlayerScreen
+import ru.burkut.audiobooks.ui.release.ReleaseDetailScreen
 import ru.burkut.audiobooks.ui.settings.ServerDialog
-import ru.burkut.audiobooks.ui.setup.ServerSetupScreen
 import ru.burkut.audiobooks.ui.theme.AppTheme
 import ru.burkut.audiobooks.ui.viewModelFactoryOf
 
@@ -34,20 +34,14 @@ class MainActivity : ComponentActivity() {
         val app = application as App
         setContent {
             AppTheme {
-                val baseUrl by app.settings.baseUrl.collectAsState()
-                val url = baseUrl
-                if (url == null) {
-                    ServerSetupScreen(app = app)
-                } else {
-                    AppContent(baseUrl = url)
-                }
+                AppContent()
             }
         }
     }
 }
 
 @Composable
-fun AppContent(baseUrl: String) {
+fun AppContent() {
     val navController = rememberNavController()
 
     // Один PlayerViewModel на весь граф навигации.
@@ -73,9 +67,26 @@ fun AppContent(baseUrl: String) {
         ) {
             composable("catalog") {
                 CatalogScreen(
-                    onOpenBook = { id -> navController.navigate("book/$id") },
+                    onOpenRelease = { id -> navController.navigate("release/$id") },
                     onOpenSettings = { showServerSettings = true },
                 )
+            }
+
+            composable("release/{releaseId}") { entry ->
+                val releaseId = entry.arguments?.getString("releaseId")?.toIntOrNull()
+                if (releaseId != null) {
+                    ReleaseDetailScreen(
+                        releaseId = releaseId,
+                        onBack = { navController.popBackStack() },
+                        onOpenBook = { id -> navController.navigate("book/$id") },
+                        onPlayRelease = { books ->
+                            books.firstOrNull()?.let { book ->
+                                playerVm.playBook(book.id)
+                                navController.navigate("player")
+                            }
+                        },
+                    )
+                }
             }
 
             composable("book/{bookId}") { entry ->
@@ -85,13 +96,9 @@ fun AppContent(baseUrl: String) {
                         bookId = bookId,
                         onBack = { navController.popBackStack() },
                         onPlay = { id ->
-                            // Стартуем воспроизведение (torrent + DownloadManager + ExoPlayer)
+                            // Стартуем воспроизведение (локальный файл + докачка через очередь)
                             // и сразу открываем полноэкранный плеер.
                             playerVm.playBook(id)
-                            navController.navigate("player")
-                        },
-                        onPlayChapter = { book, chapter ->
-                            playerVm.playChapter(book, chapter)
                             navController.navigate("player")
                         },
                     )
@@ -111,7 +118,7 @@ fun AppContent(baseUrl: String) {
 
     if (showServerSettings) {
         ServerDialog(
-            currentUrl = baseUrl,
+            currentUrl = appInstance().settings.baseUrl.value,
             onConnected = { showServerSettings = false },
             onDisconnected = { showServerSettings = false },
             onDismiss = { showServerSettings = false },
