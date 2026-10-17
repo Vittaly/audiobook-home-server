@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic-settings
+sqlalchemy>=2.0
+alembic
+apscheduler
+httpx
+selectolax
+mutagen
+pillow
+zeroconf

@@ -1,0 +1,1123 @@
+openapi: 3.1.0
+
+info:
+  title: Audiobook Server API
+  version: 0.1.0
+  description: |
+    Сервис серверного скачивания аудиокниг через торрент.
+
+    ## Основные понятия
+
+    - **Раздача (Release)** — карточка раздачи, содержит одну или несколько книг (томов).
+    - **Книга (Book)** — отдельный том внутри раздачи; имеет собственную обложку,
+      порядковый номер (ordinal), статус и главы с локальной нумерацией.
+    - **Серия (Series)** — атрибут любой книги; определяется автоматически
+      по данным карточки и именам папок. Вручную не заполняется.
+
+    ## Соглашения
+
+    - Все запросы в JSON (`application/json`), ошибки также в JSON.
+    - Даты в ISO 8601 UTC с суффиксом `Z`.
+    - Ошибки в `{"detail": "..."}`.
+    - Для всех списков используются `limit` и `offset`.
+
+    ## Статусы реализации
+
+    Эндпоинты снабжены пометкой `x-status`:
+    - `ready` — реализовано и работает.
+    - `planned` — запланировано, может измениться.
+
+servers:
+  - url: http://{host}:{port}
+    description: Основной адрес (после обнаружения через mDNS)
+    variables:
+      host:
+        default: 192.168.1.10
+      port:
+        default: "8000"
+
+tags:
+  - name: system
+    description: Системные проверки
+  - name: releases
+    description: Карточки раздач
+  - name: books
+    description: Книги (тома)
+  - name: covers
+    description: Обложки
+  - name: downloads
+    description: Управление загрузкой
+  - name: streaming
+    description: Потоковое воспроизведение
+  - name: persons
+    description: Люди и роли
+  - name: rubrics
+    description: Рубрики и жанры
+  - name: series
+    description: Серии книг
+  - name: search
+    description: Поиск
+
+paths:
+  # ============================================================
+  # SYSTEM
+  # ============================================================
+  /health:
+    get:
+      tags: [system]
+      summary: Проверка здоровья сервиса
+      operationId: getHealth
+      responses:
+        "200":
+          description: Сервис здоров
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthOut"
+      x-status: ready
+
+  # ============================================================
+  # RELEASES (КАРТОЧКИ РАЗДАЧ)
+  # ============================================================
+  /releases:
+    get:
+      tags: [releases]
+      summary: Список карточек раздач
+      operationId: listReleases
+      parameters:
+        - name: query
+          in: query
+          schema: {type: string}
+          description: Поиск по названию карточки
+        - name: status
+          in: query
+          schema: {$ref: "#/components/schemas/BookStatus"}
+        - name: rubric
+          in: query
+          schema: {type: string}
+          description: Название рубрики
+        - name: author
+          in: query
+          schema: {type: string}
+        - name: narrator
+          in: query
+          schema: {type: string}
+        - name: series_id
+          in: query
+          schema: {type: integer}
+          description: Фильтр по серии (хотя бы одна книга раздачи в серии)
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [added_at, title, year]
+            default: added_at
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+      responses:
+        "200":
+          description: Список карточек
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReleaseListResponse"
+      x-status: ready
+
+  /releases/{release_id}:
+    get:
+      tags: [releases]
+      summary: Карточка раздачи с книгами и главами
+      operationId: getRelease
+      parameters:
+        - $ref: "#/components/parameters/ReleaseId"
+      responses:
+        "200":
+          description: Полная карточка
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReleaseDetailOut"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      x-status: ready
+
+  /releases/{release_id}/cover:
+    get:
+      tags: [covers]
+      summary: Обложка карточки раздачи
+      description: |
+        Возвращает обложку раздачи из кэша или placeholder. Никогда не 404 —
+        всегда картинка, можно использовать в `<img src="...">`.
+        Поддерживается ETag.
+      operationId: getReleaseCover
+      parameters:
+        - $ref: "#/components/parameters/ReleaseId"
+      responses:
+        "200":
+          description: Изображение
+          headers:
+            ETag:
+              schema: {type: string}
+            Cache-Control:
+              schema: {type: string}
+          content:
+            image/jpeg:
+              schema: {type: string, format: binary}
+            image/png:
+              schema: {type: string, format: binary}
+            image/webp:
+              schema: {type: string, format: binary}
+        "304":
+          description: Not Modified
+        "404":
+          $ref: "#/components/responses/NotFound"
+      x-status: ready
+
+  # ============================================================
+  # BOOKS (КНИГИ / ТОМА)
+  # ============================================================
+  /books:
+    get:
+      tags: [books]
+      summary: Список книг по каталогу
+      operationId: listBooks
+      parameters:
+        - name: query
+          in: query
+          schema: {type: string}
+          description: Поиск по названию книги
+        - name: status
+          in: query
+          schema: {$ref: "#/components/schemas/BookStatus"}
+        - name: rubric
+          in: query
+          schema: {type: string}
+          description: Название рубрики
+        - name: author
+          in: query
+          schema: {type: string}
+        - name: narrator
+          in: query
+          schema: {type: string}
+        - name: series_id
+          in: query
+          schema: {type: integer}
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [added_at, title, year]
+            default: added_at
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+      responses:
+        "200":
+          description: Список книг
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookListResponse"
+      x-status: ready
+
+  /books/{book_id}:
+    get:
+      tags: [books]
+      summary: Карточка книги с главами
+      operationId: getBook
+      parameters:
+        - $ref: "#/components/parameters/BookId"
+      responses:
+        "200":
+          description: Книга (том)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookDetailOut"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      x-status: ready
+
+    delete:
+      tags: [downloads]
+      summary: Удалить книгу с файлами
+      description: |
+        Удаляет раздачу из торрент-клиента и файлы с диска.
+        Метаданные книги сохраняются, статус становится `deleted`.
+      operationId: deleteBook
+      parameters:
+        - $ref: "#/components/parameters/BookId"
+      responses:
+        "200":
+          description: Книга удалена
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookDeletedOut"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      x-status: ready
+
+  # ============================================================
+  # COVERS
+  # ============================================================
+  /books/{book_id}/cover:
+    get:
+      tags: [covers]
+      summary: Обложка книги (тома)
+      description: |
+        Возвращает обложку книги из кэша или placeholder. Никогда не 404 —
+        всегда картинка, можно использовать в `<img src="...">`.
+        Поддерживается ETag.
+
+        Для многотомной раздачи, пока у книги нет своей обложки
+        (`cover_is_temp=true`), отдаётся обложка карточки-раздачи с
+        заголовком `X-Cover-Temp: true` и `Cache-Control: no-cache` —
+        клиент должен перезапрашивать картинку, чтобы вовремя получить
+        свою обложку после докачки файла или онлайн-поиска.
+      operationId: getBookCover
+      parameters:
+        - $ref: "#/components/parameters/BookId"
+      responses:
+        "200":
+          description: Изображение
+          headers:
+            ETag:
+              schema: {type: string}
+            Cache-Control:
+              schema: {type: string}
+            X-Cover-Temp:
+              schema: {type: string, example: "true"}
+              description: >
+                Присутствует (true), когда отдаётся временная обложка
+                (обложка раздачи вместо своей): клиент не должен кэшировать
+                картинку и обязан перезапрашивать её.
+          content:
+            image/jpeg:
+              schema: {type: string, format: binary}
+            image/png:
+              schema: {type: string, format: binary}
+            image/webp:
+              schema: {type: string, format: binary}
+        "304":
+          description: Not Modified
+        "404":
+          $ref: "#/components/responses/NotFound"
+      x-status: ready
+
+  # ============================================================
+  # DOWNLOADS
+  # ============================================================
+  /books/{book_id}/download:
+    post:
+      tags: [downloads]
+      summary: Начать загрузку книги
+      operationId: startDownload
+      description: |
+        Запускает загрузку раздачи, к которой относится книга.
+        Торрент добавляется в клиент; книга и карточка переходят в `downloading`.
+      parameters:
+        - $ref: "#/components/parameters/BookId"
+      responses:
+        "202":
+          description: Загрузка начата
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadStartedOut"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "507":
+          description: Недостаточно места на диске
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-status: ready
+
+    delete:
+      tags: [downloads]
+      summary: Остановить загрузку
+      operationId: stopDownload
+      parameters:
+        - $ref: "#/components/parameters/BookId"
+        - name: delete_files
+          in: query
+          schema: {type: boolean, default: false}
+          description: Удалить скачанные файлы
+      responses:
+        "200":
+          description: Загрузка остановлена
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadStoppedOut"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      x-status: ready
+
+  /books/{book_id}/status:
+    get:
+      tags: [downloads]
+      summary: Статус загрузки
+      description: |
+        Прогресс (проценты, скорость, ETA) берётся из торрент-клиента,
+        данные остального — из БД. Есть дополнительный `release_id`.
+      operationId: getDownloadStatus
+      parameters:
+        - $ref: "#/components/parameters/BookId"
+      responses:
+        "200":
+          description: Статус
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadStatusOut"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      x-status: ready
+
+  /books/{book_id}/priority:
+    post:
+      tags: [downloads]
+      summary: Закрепить книгу (приоритет)
+      operationId: setBookPriority
+      parameters:
+        - $ref: "#/components/parameters/BookId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PriorityRequest"
+      responses:
+        "200":
+          description: Приоритет сохранён
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PriorityOut"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+      x-status: ready
+
+  # ============================================================
+  # STREAMING
+  # ============================================================
+  /books/{book_id}/stream/{chapter_id}:
+    get:
+      tags: [streaming]
+      summary: Отдать главу
+      description: |
+        Отдаёт главу для потокового воспроизведения с поддержкой Range.
+
+        **Поведение для ExoPlayer:**
+
+        - Не указывает `Range` — вернёт целиком `200 OK`.
+        - Указывает `Range` — вернёт `206 Partial Content`.
+        - Поддерживаются `Accept-Ranges: bytes`, `Content-Length`,
+          `Content-Range`, `ETag`.
+        - Если глава ещё не скачана целиком — сигнализирует и включает
+          sequential download.
+        - Каждое обращение фиксирует `chapter.last_streamed_at` (для TTL).
+      operationId: streamChapter
+      parameters:
+        - $ref: "#/components/parameters/BookId"
+        - $ref: "#/components/parameters/ChapterId"
+        - name: Range
+          in: header
+          schema: {type: string}
+          example: "bytes=0-"
+      responses:
+        "200":
+          description: Весь файл (без Range)
+          headers:
+            Accept-Ranges: {schema: {type: string, default: "bytes"}}
+            Content-Length: {schema: {type: integer}}
+          content:
+            audio/mpeg:
+              schema: {type: string, format: binary}
+        "206":
+          description: Часть файла (с Range)
+          headers:
+            Accept-Ranges: {schema: {type: string, default: "bytes"}}
+            Content-Range: {schema: {type: string}}
+            Content-Length: {schema: {type: integer}}
+            ETag: {schema: {type: string}}
+          content:
+            audio/mpeg:
+              schema: {type: string, format: binary}
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "416":
+          description: Range не удовлетворён
+      x-status: ready
+
+    head:
+      tags: [streaming]
+      summary: Заголовки главы без тела
+      operationId: headChapter
+      parameters:
+        - $ref: "#/components/parameters/BookId"
+        - $ref: "#/components/parameters/ChapterId"
+      responses:
+        "200":
+          description: Заголовки
+          headers:
+            Accept-Ranges: {schema: {type: string, default: "bytes"}}
+            Content-Length: {schema: {type: integer}}
+            Content-Type: {schema: {type: string}}
+      x-status: ready
+
+  # ============================================================
+  # PERSONS (planned)
+  # ============================================================
+  /persons:
+    get:
+      tags: [persons]
+      summary: Список людей и ролей
+      operationId: listPersons
+      parameters:
+        - name: role
+          in: query
+          schema:
+            type: string
+            enum: [author, narrator, translator, editor, illustrator]
+        - name: query
+          in: query
+          schema: {type: string}
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Список персон
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PersonListResponse"
+      x-status: planned
+
+  /persons/{person_id}:
+    get:
+      tags: [persons]
+      summary: Персона + книги
+      operationId: getPerson
+      parameters:
+        - name: person_id
+          in: path
+          required: true
+          schema: {type: integer}
+      responses:
+        "200":
+          description: Персона
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PersonDetailOut"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      x-status: planned
+
+  # ============================================================
+  # RUBRICS (planned)
+  # ============================================================
+  /rubrics:
+    get:
+      tags: [rubrics]
+      summary: Список рубрик и жанров
+      operationId: listRubrics
+      parameters:
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [genre, tag, rubric]
+      responses:
+        "200":
+          description: Список рубрик
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RubricListResponse"
+      x-status: planned
+
+  # ============================================================
+  # SERIES (planned)
+  # ============================================================
+  /series:
+    get:
+      tags: [series]
+      summary: Список серий
+      operationId: listSeries
+      parameters:
+        - name: query
+          in: query
+          schema: {type: string}
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Список серий
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SeriesListResponse"
+      x-status: planned
+
+  /series/{series_id}:
+    get:
+      tags: [series]
+      summary: Серия + книги
+      operationId: getSeries
+      parameters:
+        - name: series_id
+          in: path
+          required: true
+          schema: {type: integer}
+      responses:
+        "200":
+          description: Серия
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SeriesDetailOut"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      x-status: planned
+
+  /series/{series_id}/cover:
+    get:
+      tags: [series]
+      summary: Обложка серии
+      operationId: getSeriesCover
+      parameters:
+        - name: series_id
+          in: path
+          required: true
+          schema: {type: integer}
+      responses:
+        "200":
+          description: Изображение
+          content:
+            image/jpeg:
+              schema: {type: string, format: binary}
+        "404":
+          $ref: "#/components/responses/NotFound"
+      x-status: planned
+
+  # ============================================================
+  # SEARCH (planned)
+  # ============================================================
+  /search:
+    get:
+      tags: [search]
+      summary: Поиск по книгам, персонам, сериям
+      operationId: search
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: {type: string}
+        - name: limit
+          in: query
+          schema: {type: integer, default: 10, minimum: 1, maximum: 50}
+      responses:
+        "200":
+          description: Результаты поиска
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchOut"
+      x-status: planned
+
+# ============================================================
+# COMPONENTS
+# ============================================================
+components:
+
+  parameters:
+    BookId:
+      name: book_id
+      in: path
+      required: true
+      schema: {type: integer, minimum: 1}
+    ReleaseId:
+      name: release_id
+      in: path
+      required: true
+      schema: {type: integer, minimum: 1}
+    ChapterId:
+      name: chapter_id
+      in: path
+      required: true
+      schema: {type: integer, minimum: 1}
+    Limit:
+      name: limit
+      in: query
+      schema: {type: integer, default: 50, minimum: 1, maximum: 200}
+    Offset:
+      name: offset
+      in: query
+      schema: {type: integer, default: 0, minimum: 0}
+
+  responses:
+    NotFound:
+      description: Не найдено
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: Конфликт состояний
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+
+    # ---------- Общее ----------
+
+    Error:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
+          example: "book not found"
+
+    HealthOut:
+      type: object
+      required: [status, db, uptime_sec, mode, torrent_client]
+      properties:
+        status: {type: string, example: ok}
+        db: {type: string, example: ok}
+        uptime_sec: {type: integer, example: 86400}
+        mode:
+          type: string
+          description: Режим торрент-клиента (TORRENT_BACKEND)
+          enum: [qbittorrent, transmission, libtorrent]
+          example: qbittorrent
+        torrent_client:
+          type: string
+          description: Статус автозапуска торрент-клиента
+          enum: [ready, unavailable]
+          example: ready
+
+    BookStatus:
+      type: string
+      enum: [announced, downloading, partial, ready, deleting, deleted, error]
+
+    ChapterStatus:
+      type: string
+      enum: [absent, downloading, partial, ready, deleting, deleted, error]
+
+    # ---------- Серии ----------
+
+    SeriesRef:
+      type: object
+      required: [id, title]
+      properties:
+        id: {type: integer}
+        title: {type: string}
+        order: {type: integer, nullable: true}
+
+    PersonRef:
+      type: object
+      required: [name, role]
+      properties:
+        name: {type: string}
+        role:
+          type: string
+          enum: [author, narrator, translator, editor, illustrator]
+
+    ChapterOut:
+      type: object
+      required: [id, ordinal, size_bytes, status, progress, stream_url]
+      properties:
+        id: {type: integer}
+        ordinal: {type: integer}
+        title: {type: string, nullable: true}
+        duration_sec: {type: integer, nullable: true}
+        size_bytes: {type: integer}
+        status: {$ref: "#/components/schemas/ChapterStatus"}
+        progress: {type: number, format: float, minimum: 0, maximum: 1}
+        stream_url:
+          type: string
+          example: "/books/42/stream/101"
+
+    # ---------- Карточки раздач (releases) ----------
+
+    ReleaseBookOut:
+      type: object
+      required: [id, ordinal, title, status]
+      properties:
+        id: {type: integer}
+        ordinal: {type: integer}
+        title: {type: string}
+        folder: {type: string, nullable: true}
+        series: {$ref: "#/components/schemas/SeriesRef", nullable: true}
+        status: {$ref: "#/components/schemas/BookStatus"}
+        chapters_count: {type: integer}
+        chapters_ready: {type: integer}
+        total_duration_sec: {type: integer, nullable: true}
+        size_bytes: {type: integer, nullable: true}
+        cover_url:
+          type: string
+          nullable: true
+          description: |
+            Ссылка на обложку книги. Эндпоинт отдаёт обложку или
+            placeholder, поэтому в ответе сервера URL не бывает null.
+          example: "http://192.168.1.10:8000/books/7/cover"
+        cover_is_temp:
+          type: boolean
+          default: false
+          description: |
+            Признак временной обложки книги (актуально для многотомных
+            раздач): пока `true` и у книги нет своей обложки, эндпоинт
+            /books/{id}/cover отдаёт обложку карточки-раздачи и ставит
+            заголовок X-Cover-Temp: true — клиент перезапрашивает картинку.
+        last_accessed: {type: string, format: date-time, nullable: true}
+
+    ReleaseBookDetailOut:
+      allOf:
+        - $ref: "#/components/schemas/ReleaseBookOut"
+        - type: object
+          properties:
+            chapters:
+              type: array
+              items: {$ref: "#/components/schemas/ChapterOut"}
+
+    ReleaseOut:
+      type: object
+      required: [id, title, status, added_at]
+      properties:
+        id: {type: integer}
+        title: {type: string}
+        title_raw: {type: string, nullable: true}
+        author: {type: string, nullable: true}
+        narrator: {type: string, nullable: true}
+        year: {type: integer, nullable: true}
+        language: {type: string, nullable: true, example: ru}
+        description: {type: string, nullable: true}
+        rubrics:
+          type: array
+          items: {type: string}
+        status: {$ref: "#/components/schemas/BookStatus"}
+        content_type:
+          type: string
+          example: single
+          description: Тип карточки раздачи (сейчас всегда single)
+        books_count: {type: integer}
+        books_ready: {type: integer}
+        chapters_count: {type: integer}
+        chapters_ready: {type: integer}
+        total_duration_sec: {type: integer, nullable: true}
+        size_bytes: {type: integer, nullable: true}
+        cover_url:
+          type: string
+          nullable: true
+          description: |
+            Ссылка на обложку карточки. Эндпоинт отдаёт обложку или
+            placeholder, поэтому в ответе сервера URL не бывает null.
+          example: "http://192.168.1.10:8000/releases/3/cover"
+        added_at: {type: string, format: date-time}
+        downloaded_at: {type: string, format: date-time, nullable: true}
+        last_accessed: {type: string, format: date-time, nullable: true}
+
+    ReleaseDetailOut:
+      allOf:
+        - $ref: "#/components/schemas/ReleaseOut"
+        - type: object
+          properties:
+            persons:
+              type: array
+              items: {$ref: "#/components/schemas/PersonRef"}
+            books:
+              type: array
+              items: {$ref: "#/components/schemas/ReleaseBookDetailOut"}
+
+    ReleaseListResponse:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: {$ref: "#/components/schemas/ReleaseOut"}
+        total: {type: integer}
+        limit: {type: integer}
+        offset: {type: integer}
+
+    # ---------- Книги (тома) ----------
+
+    BookOut:
+      type: object
+      required: [id, ordinal, title, status, cover_url, added_at]
+      properties:
+        id: {type: integer}
+        ordinal: {type: integer}
+        title: {type: string}
+        author: {type: string, nullable: true}
+        narrator: {type: string, nullable: true}
+        year: {type: integer, nullable: true}
+        language: {type: string, nullable: true, example: ru}
+        series: {$ref: "#/components/schemas/SeriesRef", nullable: true}
+        rubrics:
+          type: array
+          items: {type: string}
+        status: {$ref: "#/components/schemas/BookStatus"}
+        chapters_count: {type: integer}
+        chapters_ready: {type: integer}
+        total_duration_sec: {type: integer, nullable: true}
+        size_bytes: {type: integer, nullable: true}
+        cover_url:
+          type: string
+          nullable: true
+          description: |
+            Ссылка на обложку книги. Эндпоинт отдаёт обложку или
+            placeholder, поэтому в ответе сервера URL не бывает null.
+          example: "http://192.168.1.10:8000/books/42/cover"
+        cover_is_temp:
+          type: boolean
+          default: false
+          description: |
+            Признак временной обложки книги (актуально для многотомных
+            раздач): пока `true` и у книги нет своей обложки, эндпоинт
+            /books/{id}/cover отдаёт обложку карточки-раздачи и ставит
+            заголовок X-Cover-Temp: true — клиент перезапрашивает картинку.
+        added_at: {type: string, format: date-time}
+        last_accessed: {type: string, format: date-time, nullable: true}
+
+    BookDetailOut:
+      allOf:
+        - $ref: "#/components/schemas/BookOut"
+        - type: object
+          properties:
+            title_raw: {type: string, nullable: true}
+            description: {type: string, nullable: true}
+            persons:
+              type: array
+              items: {$ref: "#/components/schemas/PersonRef"}
+            chapters:
+              type: array
+              items: {$ref: "#/components/schemas/ChapterOut"}
+
+    BookListResponse:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: {$ref: "#/components/schemas/BookOut"}
+        total: {type: integer}
+        limit: {type: integer}
+        offset: {type: integer}
+
+    # ---------- Загрузка ----------
+
+    DownloadStartedOut:
+      type: object
+      required: [book_id, client_id, status, save_path, message]
+      properties:
+        book_id: {type: integer}
+        client_id:
+          type: integer
+          nullable: true
+          description: id торрента в клиенте (Transmission)
+        status: {$ref: "#/components/schemas/BookStatus"}
+        save_path: {type: string}
+        message: {type: string}
+
+    DownloadStoppedOut:
+      type: object
+      required: [book_id, status, message]
+      properties:
+        book_id: {type: integer}
+        status: {$ref: "#/components/schemas/BookStatus"}
+        message: {type: string}
+
+    ChapterProgressOut:
+      type: object
+      required: [id, ordinal, status, progress, size_bytes, downloaded_bytes]
+      properties:
+        id: {type: integer}
+        ordinal: {type: integer}
+        title: {type: string, nullable: true}
+        status: {$ref: "#/components/schemas/ChapterStatus"}
+        progress: {type: number, format: float}
+        size_bytes: {type: integer}
+        downloaded_bytes: {type: integer}
+
+    DownloadStatusOut:
+      type: object
+      required:
+        [book_id, release_id, status, progress, total_bytes, downloaded_bytes,
+         speed_bps, peers, seeds, chapters_ready, chapters_total, chapters]
+      properties:
+        book_id: {type: integer}
+        release_id: {type: integer, nullable: true}
+        status: {$ref: "#/components/schemas/BookStatus"}
+        client_state:
+          type: string
+          nullable: true
+          description: Состояние раздачи в торрент-клиенте
+          example: downloading
+        progress: {type: number, format: float}
+        total_bytes: {type: integer}
+        downloaded_bytes: {type: integer}
+        speed_bps: {type: integer}
+        eta_sec: {type: integer, nullable: true}
+        peers: {type: integer}
+        seeds: {type: integer}
+        chapters_ready: {type: integer}
+        chapters_total: {type: integer}
+        chapters:
+          type: array
+          items: {$ref: "#/components/schemas/ChapterProgressOut"}
+
+    BookDeletedOut:
+      type: object
+      required: [book_id, status, message]
+      properties:
+        book_id: {type: integer}
+        status: {$ref: "#/components/schemas/BookStatus"}
+        freed_bytes: {type: integer}
+        message: {type: string}
+
+    PriorityRequest:
+      type: object
+      required: [priority]
+      properties:
+        priority:
+          type: integer
+          minimum: 0
+          maximum: 1
+          description: 0 — в очередь, 1 — закрепить (на время до TTL)
+
+    PriorityOut:
+      type: object
+      required: [book_id, priority, message]
+      properties:
+        book_id: {type: integer}
+        priority: {type: integer}
+        message: {type: string}
+
+    # ---------- Люди (planned) ----------
+
+    PersonOut:
+      type: object
+      required: [id, name, roles, books_count]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        roles:
+          type: array
+          items: {type: string}
+        books_count: {type: integer}
+
+    PersonDetailOut:
+      type: object
+      required: [id, name, roles, books]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        roles:
+          type: array
+          items: {type: string}
+        books:
+          type: array
+          items: {$ref: "#/components/schemas/BookOut"}
+
+    PersonListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items: {$ref: "#/components/schemas/PersonOut"}
+        total: {type: integer}
+
+    # ---------- Рубрики (planned) ----------
+
+    RubricOut:
+      type: object
+      required: [id, kind, title, books_count]
+      properties:
+        id: {type: integer}
+        kind:
+          type: string
+          enum: [genre, tag, rubric]
+        title: {type: string}
+        books_count: {type: integer}
+
+    RubricListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: {$ref: "#/components/schemas/RubricOut"}
+
+    # ---------- Серии (planned) ----------
+
+    SeriesOut:
+      type: object
+      required: [id, title, books_count]
+      properties:
+        id: {type: integer}
+        title: {type: string}
+        books_count: {type: integer}
+        cover_url: {type: string, nullable: true}
+
+    SeriesDetailOut:
+      type: object
+      required: [id, title, books]
+      properties:
+        id: {type: integer}
+        title: {type: string}
+        cover_url: {type: string, nullable: true}
+        books:
+          type: array
+          items: {$ref: "#/components/schemas/BookOut"}
+
+    SeriesListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items: {$ref: "#/components/schemas/SeriesOut"}
+        total: {type: integer}
+
+    # ---------- Поиск (planned) ----------
+
+    SearchOut:
+      type: object
+      required: [books, persons, series]
+      properties:
+        books:
+          type: array
+          items: {$ref: "#/components/schemas/BookOut"}
+        persons:
+          type: array
+          items: {$ref: "#/components/schemas/PersonOut"}
+        series:
+          type: array
+          items: {$ref: "#/components/schemas/SeriesOut"}
