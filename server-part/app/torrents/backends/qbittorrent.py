@@ -99,34 +99,36 @@ class QBittorrentBackend(TorrentBackend):
                          torrent_hash[:8])
                 return torrent_hash
 
-        try:
-            c = self._connect()
-            result = c.torrents_add(
-                urls=magnet,
-                save_path=str(save_path),
-                is_paused=False,
-            )
-            log.info("qBittorrent: torrents_add magnet → %r", result)
+        for attempt in (1, 2):
+            try:
+                c = self._connect()
+                result = c.torrents_add(
+                    urls=magnet,
+                    save_path=str(save_path),
+                    is_paused=False,
+                )
+                log.info("qBittorrent: torrents_add magnet → %r", result)
 
-            if result != "Ok.":
-                log.warning("qBittorrent: torrents_add вернул %r", result)
+                if result != "Ok.":
+                    log.warning("qBittorrent: torrents_add вернул %r", result)
+                    if torrent_hash:
+                        existing = self._find_by_hash(torrent_hash)
+                        if existing is not None:
+                            return torrent_hash
+                    return None
+
+                return self._latest_added_hash()
+
+            except Conflict409Error:
+                log.warning("add_magnet: 409, торрент уже есть")
                 if torrent_hash:
-                    existing = self._find_by_hash(torrent_hash)
-                    if existing is not None:
-                        return torrent_hash
-                return None
+                    return torrent_hash
+                return self._hash_from_magnet(magnet)
 
-            return self._latest_added_hash()
-
-        except Conflict409Error:
-            log.warning("add_magnet: 409, торрент уже есть")
-            if torrent_hash:
-                return torrent_hash
-            return self._hash_from_magnet(magnet)
-
-        except Exception:
-            log.exception("add_magnet")
-            return None
+            except Exception:
+                log.exception("add_magnet (попытка %d)", attempt)
+                self._client = None  # сброс сессии и повторная попытка
+        return None
 
     def add_torrent_bytes(self, data: bytes, save_path: Path,
                           auto_priority: bool = True) -> str | None:
@@ -156,37 +158,38 @@ class QBittorrentBackend(TorrentBackend):
                 return torrent_hash
 
         # --- добавляем ---
-        try:
-            c = self._connect()
-            result = c.torrents_add(
-                torrent_files=data,
-                save_path=str(save_path),
-                is_paused=False,
-            )
-            log.info("qBittorrent: torrents_add bytes → %r", result)
+        for attempt in (1, 2):
+            try:
+                c = self._connect()
+                result = c.torrents_add(
+                    torrent_files=data,
+                    save_path=str(save_path),
+                    is_paused=False,
+                )
+                log.info("qBittorrent: torrents_add bytes → %r", result)
 
-            if result != "Ok.":
-                log.warning("qBittorrent: torrents_add вернул %r", result)
+                if result != "Ok.":
+                    log.warning("qBittorrent: torrents_add вернул %r", result)
+                    if torrent_hash:
+                        existing = self._find_by_hash(torrent_hash)
+                        if existing is not None:
+                            if auto_priority:
+                                self._apply_initial_priorities(torrent_hash)
+                            return torrent_hash
+                    return None
+
+            except Conflict409Error:
+                log.warning("add_torrent_bytes: 409, торрент уже есть")
                 if torrent_hash:
                     existing = self._find_by_hash(torrent_hash)
-                    if existing is not None:
-                        if auto_priority:
-                            self._apply_initial_priorities(torrent_hash)
-                        return torrent_hash
+                    if existing is not None and auto_priority:
+                        self._apply_initial_priorities(torrent_hash)
+                    return torrent_hash
                 return None
 
-        except Conflict409Error:
-            log.warning("add_torrent_bytes: 409, торрент уже есть")
-            if torrent_hash:
-                existing = self._find_by_hash(torrent_hash)
-                if existing is not None and auto_priority:
-                    self._apply_initial_priorities(torrent_hash)
-                return torrent_hash
-            return None
-
-        except Exception:
-            log.exception("add_torrent_bytes")
-            return None
+            except Exception:
+                log.exception("add_torrent_bytes (попытка %d)", attempt)
+                self._client = None  # сброс сессии и повторная попытка
 
         # --- успешно добавлен ---
         if torrent_hash is None:
@@ -225,12 +228,14 @@ class QBittorrentBackend(TorrentBackend):
         return self._to_info(t)
 
     def list_active(self) -> list[TorrentInfo]:
-        try:
-            return [self._to_info(t)
-                    for t in self._connect().torrents_info()]
-        except Exception:
-            log.exception("list_active")
-            return []
+        for attempt in (1, 2):
+            try:
+                return [self._to_info(t)
+                        for t in self._connect().torrents_info()]
+            except Exception:
+                log.exception("list_active (попытка %d)", attempt)
+                self._client = None
+        return []
 
     def get_files(self, torrent_hash: str) -> list[TorrentFileInfo]:
         """Файлы внутри торрента."""
@@ -358,12 +363,22 @@ class QBittorrentBackend(TorrentBackend):
 
     def _apply_initial_priorities(self, torrent_hash: str) -> None:
         """
-        Находит первый аудиофайл и выставляет приоритеты:
+        Фаза 1: находит первый аудиофайл и выставляет приоритеты:
           high (6) на первый аудио,
-          normal (1) на остальные аудио + обложки томов (чтобы скачались),
-          skip (0) на прочие не-аудио.
+          normal (1) на обложки томов (лёгкие, нужны для своей обложки),
+          skip (0) на ВСЕ остальные аудио и прочий не-аудио мусор.
 
-        Sequential включается ОТДЕЛЬНО — после приоритетов.
+        Обложки (картинки) в skip НЕ попадают — иначе high→normal→skip
+        перезапишет их обратно в skip и обложка тома не скачается.
+
+        Качаем ровно одну (стартовую) главу за раз: сервер не тратит пиров
+        и полосу на остальные файлы, поэтому первая глава становится готовой
+        максимально быстро. Как только она готова, poller (или эндпоинт
+        запроса главы) вызывает actualize_release, который переводит раздачу
+        в фазу 2 — качается вся раздача, high на первую незагруженную главу.
+
+        Sequential выключен — порядок файлов раздачи не равен аудио-порядку
+        глав, а sequential игнорирует приоритеты.
         """
         files = self.get_files(torrent_hash)
         if not files:
@@ -382,10 +397,14 @@ class QBittorrentBackend(TorrentBackend):
 
         first = audio[0]
         high = [first.index]
-        normal = [f.index for f in audio if f.index != first.index]
-        normal += [f.index for f in files if is_image(f.name)]
-        skip = [f.index for f in files
-                if not is_audio(f.name) and not is_image(f.name)]
+        normal = [f.index for f in files if is_image(f.name)]
+        # ВСЕ прочие аудио + не-аудио мусор — в skip: качаем строго по одной
+        # главе. Обложки (картинки) НЕ трогаем — они уже в normal выше, иначе
+        # set_file_priorities перезапишет их в skip (порядок high→normal→skip)
+        # и обложка тома не скачается.
+        normal_set = set(normal)
+        skip = [f.index for f in files if f.index != first.index
+                and f.index not in normal_set]
 
         log.info("_apply_initial_priorities: hash=%s файлов=%d, "
                  "первый аудио index=%s name=%r",
@@ -397,9 +416,11 @@ class QBittorrentBackend(TorrentBackend):
         if not ok:
             log.warning("_apply_initial_priorities: приоритеты не легли")
 
-        # 2. Sequential — отдельно, чтобы qBittorrent не сбросил
-        #    приоритеты при его включении
-        self.enable_sequential(torrent_hash, enabled=True)
+        # 2. Sequential ОТКЛЮЧЁН: порядок файлов раздачи не равен аудио-
+        #    порядку глав, а sequential игнорирует приоритеты — из-за него
+        #    стартовая глава скачивалась последней. Вместо sequential
+        #    порядок задают приоритеты (high на первый аудиофайл).
+        self.enable_sequential(torrent_hash, enabled=False)
 
         # 3. Читаем обратно, что получилось
         try:
@@ -417,26 +438,31 @@ class QBittorrentBackend(TorrentBackend):
     # ============================================================
 
     def _find_by_hash(self, torrent_hash: str):
-        try:
-            h = torrent_hash.lower()
-            for t in self._connect().torrents_info():
-                if t.hash.lower() == h:
-                    return t
-        except Exception:
-            log.exception("_find_by_hash(%s)", torrent_hash[:8])
+        h = torrent_hash.lower()
+        for attempt in (1, 2):
+            try:
+                for t in self._connect().torrents_info():
+                    if t.hash.lower() == h:
+                        return t
+            except Exception:
+                log.exception("_find_by_hash(%s) (попытка %d)",
+                              torrent_hash[:8], attempt)
+                self._client = None  # сброс сессии и повторная попытка
         return None
 
     def _latest_added_hash(self) -> str | None:
         """Хэш самого свежего добавленного торрента."""
-        try:
-            torrents = self._connect().torrents_info()
-            if not torrents:
-                return None
-            latest = max(torrents, key=lambda t: t.added_on or 0)
-            return latest.hash
-        except Exception:
-            log.exception("_latest_added_hash")
-            return None
+        for attempt in (1, 2):
+            try:
+                torrents = self._connect().torrents_info()
+                if not torrents:
+                    return None
+                latest = max(torrents, key=lambda t: t.added_on or 0)
+                return latest.hash
+            except Exception:
+                log.exception("_latest_added_hash (попытка %d)", attempt)
+                self._client = None
+        return None
 
     def _hash_from_magnet(self, magnet: str) -> str | None:
         m = _MAGNET_HASH_RE.search(magnet)

@@ -41,13 +41,22 @@ class BookRepository(
 
     /** Полный снапшот каталога раздач с сервера (пишется в кэш). */
     suspend fun syncReleases() {
-        val resp = apiProvider.get().listReleases(limit = 200, offset = 0)
+        // Снапшот каталога берём сразу отсортированным по дате релиза на
+        // трекере (сначала новые), чтобы локальный Room заполнялся в целевом
+        // порядке и «Сначала новые» на клиенте совпадала с сервером.
+        val resp = apiProvider.get().listReleases(
+            limit = 200,
+            offset = 0,
+            sort = "released_at",
+            order = "desc",
+        )
         val items = resp.items
-        // Простейший снапшот: заменяем раздачи, но сохраняем локальные флаги book/download.
+        // Заменяем карточки раздач, но книги и главы НЕ очищаем целиком:
+        // список /releases не содержит вложенных книг, и полная очистка
+        // теряла тома уже открытой раздачи (на экране «Слушать» — books=0).
+        // Вместо этого после замены раздач удаляем только осиротевшие записи.
         val existing = catalogDao.getQueuedReleases().associateBy { it.id }
         catalogDao.clearReleases()
-        catalogDao.clearBooks()
-        catalogDao.clearChapters()
         for (item in items) {
             val prev = existing[item.id]
             catalogDao.upsertRelease(
@@ -56,6 +65,9 @@ class BookRepository(
                 ),
             )
         }
+        // Чистим книги/главы, чьей раздачи/книги больше нет в каталоге.
+        catalogDao.deleteOrphanBooks()
+        catalogDao.deleteOrphanChapters()
     }
 
     suspend fun getReleaseEntity(id: Int): ReleaseEntity? = catalogDao.getRelease(id)
@@ -69,18 +81,35 @@ class BookRepository(
 
     /** Полная карточка раздачи: при доступности берём свежую с сервера и кэшируем. */
     suspend fun getReleaseDetail(id: Int, online: Boolean): ReleaseDetailOut? {
+        android.util.Log.d("Repo", "getReleaseDetail id=$id online=$online")
         if (!online) return null
         val detail = try {
             apiProvider.get().getRelease(id)
         } catch (e: Exception) {
+            android.util.Log.e("Repo", "getReleaseDetail HTTP error id=$id", e)
             null
-        } ?: return null
+        } ?: run {
+            android.util.Log.w("Repo", "getReleaseDetail null id=$id")
+            return null
+        }
+        android.util.Log.d("Repo", "getReleaseDetail ok id=$id books=${detail.books.size} status=${detail.status}")
         catalogDao.upsertRelease(detail.toEntity())
         for (book in detail.books) {
             val bookOut = book
+            android.util.Log.d("Repo", "upsert book ${bookOut.id} ordinal=${bookOut.ordinal} chapters=${bookOut.chapters.size}")
             catalogDao.upsertBook(bookOut.toEntity(id))
             for (ch in bookOut.chapters) {
-                catalogDao.upsertChapter(ch.toEntity(bookOut.id))
+                // upsertChapter использует OnConflictStrategy.REPLACE, который удаляет
+                // строку и вставляет новую — локальные поля (localDurationSec,
+                // localStatus, downloadedBytes) были бы затёрты на каждом поллинге
+                // сервера. Подмешиваем их из уже сохранённой записи.
+                val prev = catalogDao.getChapter(ch.id)
+                val entity = ch.toEntity(bookOut.id).copy(
+                    localStatus = prev?.localStatus ?: "absent",
+                    downloadedBytes = prev?.downloadedBytes ?: 0,
+                    localDurationSec = prev?.localDurationSec,
+                )
+                catalogDao.upsertChapter(entity)
             }
         }
         return detail
@@ -90,15 +119,22 @@ class BookRepository(
 
     fun observeBooks(releaseId: Int) = catalogDao.observeBooks(releaseId)
 
+    /** Все книги кэша — каталог использует их для фильтрации раздач по серии. */
+    fun observeAllBooks() = catalogDao.observeAllBooks()
+
     suspend fun getBookEntity(id: Int): BookEntity? = catalogDao.getBook(id)
 
     suspend fun getChapters(bookId: Int): List<ChapterEntity> = catalogDao.getChapters(bookId)
 
     fun observeChapters(bookId: Int) = catalogDao.observeChapters(bookId)
 
+    /** Все тома раздачи. */
+    suspend fun getBooksByRelease(releaseId: Int): List<BookEntity> =
+        catalogDao.getBooksByRelease(releaseId)
+
     /** Тома раздачи, исключая текущую книгу (для перехода к следующему тому). */
     suspend fun getBooksByRelease(releaseId: Int, excludeBookId: Int): List<BookEntity> =
-        catalogDao.getBooksByRelease(releaseId).filterNot { it.id == excludeBookId }
+        getBooksByRelease(releaseId).filterNot { it.id == excludeBookId }
 
     suspend fun getBookByOrdinal(releaseId: Int, ordinal: Int): BookEntity? =
         catalogDao.getBookByOrdinal(releaseId, ordinal)
@@ -118,6 +154,11 @@ class BookRepository(
         catalogDao.updateChapterLocal(chapterId, status, downloaded)
     }
 
+    /** Сохранить реальную длительность главы, измеренную по аудиофайлу на устройстве. */
+    suspend fun setChapterLocalDuration(chapterId: Int, durationSec: Int?) {
+        catalogDao.setChapterLocalDuration(chapterId, durationSec)
+    }
+
     suspend fun updateBookLocal(bookId: Int, status: String, downloaded: Long, total: Long) {
         catalogDao.updateBookLocal(bookId, status, downloaded, total)
     }
@@ -131,6 +172,10 @@ class BookRepository(
     // ---------- Серверные операции загрузки ----------
 
     suspend fun startDownload(bookId: Int) = apiProvider.get().startDownload(bookId)
+
+    /** Старт загрузки всей раздачи без знания книг (сервер не создаёт книгу-заглушку). */
+    suspend fun startReleaseDownload(releaseId: Int, bookId: Int? = null) =
+        apiProvider.get().startReleaseDownload(releaseId, bookId)
 
     suspend fun stopDownload(bookId: Int, deleteFiles: Boolean = false) =
         apiProvider.get().stopDownload(bookId, deleteFiles)
@@ -182,6 +227,7 @@ internal fun ReleaseOut.toEntity(): ReleaseEntity = ReleaseEntity(
     sizeBytes = size_bytes,
     coverUrl = cover_url,
     addedAt = added_at,
+    releasedAt = released_at ?: added_at,
     downloadedAt = downloaded_at,
     lastAccessed = last_accessed,
 )
@@ -206,6 +252,7 @@ internal fun ReleaseDetailOut.toEntity(): ReleaseEntity = ReleaseEntity(
     sizeBytes = size_bytes,
     coverUrl = cover_url,
     addedAt = added_at,
+    releasedAt = released_at ?: added_at,
     downloadedAt = downloaded_at,
     lastAccessed = last_accessed,
 )
@@ -231,6 +278,9 @@ internal fun ru.burkut.audiobooks.data.api.ReleaseBookDetailOut.toEntity(release
         coverIsTemp = cover_is_temp,
         addedAt = "",
         lastAccessed = last_accessed,
+        seriesId = series?.id,
+        seriesTitle = series?.title,
+        seriesOrder = series?.order,
     )
 
 internal fun ru.burkut.audiobooks.data.api.ChapterOut.toEntity(bookId: Int): ChapterEntity =

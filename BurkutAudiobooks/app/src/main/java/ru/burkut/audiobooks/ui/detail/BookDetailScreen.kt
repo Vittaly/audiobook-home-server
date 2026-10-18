@@ -44,6 +44,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
@@ -266,7 +267,13 @@ private fun BookDetailContent(
                         Spacer(Modifier.height(6.dp))
                         LinearProgressIndicator(
                             progress = { chaptersReady.toFloat() / chaptersCount },
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(0.dp)),
+                            strokeCap = StrokeCap.Butt,
+                            // Убираем «квадрат-стоп» в конце трека (артефакт M3).
+                            gapSize = 0.dp,
+                            drawStopIndicator = {},
                         )
                         Text(
                             "Готово $chaptersReady из $chaptersCount глав",
@@ -308,7 +315,12 @@ private fun BookDetailContent(
                                 progress = { dl.progress },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(vertical = 8.dp),
+                                    .padding(vertical = 8.dp)
+                                    .clip(RoundedCornerShape(0.dp)),
+                                strokeCap = StrokeCap.Butt,
+                                // Убираем «квадрат-стоп» в конце трека (артефакт M3).
+                                gapSize = 0.dp,
+                                drawStopIndicator = {},
                             )
                             Text(
                                 "${formatBytes(dl.downloaded_bytes)} / ${formatBytes(dl.total_bytes)}",

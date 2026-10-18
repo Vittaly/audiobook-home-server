@@ -30,6 +30,19 @@ fun formatDurationMs(ms: Long): String {
 fun formatSeconds(sec: Int?): String =
     if (sec == null) "—" else formatDurationMs(sec * 1000L)
 
+/**
+ * Дата релиза с трекера (ISO-8601: 'YYYY-MM-DD' или 'YYYY-MM-DDTHH:MM:SS±...')
+ * → 'dd.MM.yyyy'. Если строка пустая или неожиданного формата — null.
+ */
+fun formatReleaseDate(iso: String?): String? {
+    val datePart = iso?.substringBefore('T')?.substringBefore(' ')?.trim()
+    if (datePart.isNullOrEmpty()) return null
+    val parts = datePart.split('-')
+    if (parts.size != 3 || parts[0].length != 4) return null
+    val (year, month, day) = parts
+    return "$day.$month.$year"
+}
+
 fun formatBytes(bytes: Long): String {
     val kb = bytes / 1024.0
     return when {

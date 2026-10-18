@@ -9,3 +9,7 @@ selectolax
 mutagen
 pillow
 zeroconf
+
+# торрент-бэкенды (нужен тот, что указан в TORRENT_BACKEND)
+qbittorrent-api        # TORRENT_BACKEND=qbittorrent (по умолчанию)
+transmission-rpc      # TORRENT_BACKEND=transmission

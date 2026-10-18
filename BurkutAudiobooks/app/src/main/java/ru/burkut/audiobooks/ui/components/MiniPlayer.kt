@@ -74,8 +74,14 @@ fun MiniPlayer(
                             (state.bookPositionMs.toFloat() / state.bookDurationMs).coerceIn(0f, 1f)
                         } else 0f
                     },
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp)
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(0.dp)),
                     strokeCap = androidx.compose.ui.graphics.StrokeCap.Butt,
+                    // Убираем «квадрат-стоп» в конце трека (артефакт M3).
+                    gapSize = 0.dp,
+                    drawStopIndicator = {},
                 )
             }
             IconButton(onClick = playerVm::togglePlayPause) {

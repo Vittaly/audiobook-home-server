@@ -5,24 +5,26 @@
   1. Получает список активных торрентов из клиента.
   2. Для каждого находит Release (карточка раздачи).
   3. Если у раздачи ещё нет глав (ни у одной книги) и метаданные готовы —
-     создаёт книги и главы (ingest_release) и ставит high на первую
-     нескачанную главу первой книги.
-  4. Если главы есть — обновляет статусы по книгам. Когда какая-то глава
-     завершилась, продвигает high на первую нескачанную главу этой книги:
-       - пропускаем всё, что уже ready,
-       - на первой не-ready ставим priority_high.
+     создаёт книги и главы (ingest_release).
+  4. Актуализирует раздачу через actualize_release(): догоняет статусы глав
+     и приводит приоритеты к целевой двухфазной схеме.
   5. Помечает раздачи, чьи торренты пропали из клиента, как announced
      (статусы книг пересчитываются, карточка агрегируется).
 
-Правило продвижения high:
-  high всегда на первой по ordinal нескаченной главе книги.
-  sequential download включён — файлы книги качаются по порядку.
+Правило продвижения high (см. actualize_release):
+  Приоритет в торрент-клиенте задаётся НА ТОРРЕНТ, а один торрент — это вся
+  раздача (все тома). Поэтому high считается ПО ВСЕЙ раздаче:
+    books по ordinal -> chapters по ordinal.
+  Фаза 1 — качается ровно первая глава раздачи.
+  Фаза 2 (есть готовая глава) — качается вся раздача, high на первую
+  незагруженную главу, остальные аудио и обложки в normal.
 """
 
 import asyncio
 import logging
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.catalog.book_covers import try_search_book_cover
 from app.catalog.covers import CoverService
@@ -40,6 +42,11 @@ _AUDIO_EXTS = {".mp3", ".m4a", ".m4b", ".flac", ".ogg", ".opus"}
 # id книг, для которых уже запущен фоновый онлайн-поиск обложки
 _search_in_flight: set[int] = set()
 
+# последний применённый приоритет по раздаче: hash -> (file_index, фаза2).
+# Защита от повторного дёргания торрент-клиента на каждом проходе, пока
+# целевая глава и фаза не изменились.
+_last_priority: dict[str, tuple[int, bool]] = {}
+
 
 # ============================================================
 # ПУБЛИЧНАЯ ТОЧКА ВХОДА
@@ -48,7 +55,9 @@ _search_in_flight: set[int] = set()
 async def poll_downloads(covers: CoverService) -> dict:
     """Один проход синхронизации. Возвращает статистику."""
     if not manager.ping():
-        log.warning(">>> poller: торрент-клиент недоступен")
+        # причина уже прологирована внутри manager.ping() (с троттлингом),
+        # чтобы не спамить одним и тем же предупреждением каждые 5 сек
+        log.debug(">>> poller: торрент-клиент недоступен")
         return {"error": "client unavailable"}
 
     active = manager.list_active()
@@ -121,36 +130,31 @@ def _process_torrent(t, covers: CoverService) -> tuple[str | None, list[int]]:
                 covers=covers,
             )
 
-            if created:
-                log.info("release=%s: создано %d глав из торрента %s",
-                         release.id, created, t.hash[:8])
-                # при создании глав все absent →
-                # high на первую главу первой книги
-                first = release.books[0] if release.books else None
-                if first is not None and first.chapters:
-                    _advance_high(t.hash, first)
-                search_ids = [
-                    b.id for b in release.books
-                    if _book_needs_online_cover(b)
-                ]
-                return "scanned", search_ids
+            if not created:
+                return None, []
 
-            return None, []
+            log.info("release=%s: создано %d глав из торрента %s",
+                     release.id, created, t.hash[:8])
+            search_ids = [
+                b.id for b in release.books
+                if _book_needs_online_cover(b)
+            ]
+            # при создании глав все absent — actualize_release сам поставит
+            # приоритеты (фаза 1: качается ровно первая глава раздачи)
+            actualize_release(db, t.hash, release)
+            return "scanned", search_ids
 
-        # ---------- главы есть, обновляем статусы ----------
-        files = manager.get_files(t.hash)
-        if not files:
-            return None, []
+        # ---------- главы есть, актуализируем раздачу ----------
+        # статусы глав + приоритеты всей раздачи — теми же действиями,
+        # что и в эндпоинте запроса главы
+        changed = actualize_release(db, t.hash, release)
 
-        # обновляем только те книги, файлы которых есть в группе;
         # попутно докачиваем/копируем обложки томов и собираем книги,
         # которым нужен онлайн-поиск обложки
-        changed = False
         search_ids: list[int] = []
         for book in release.books:
-            if book.chapters:
-                changed |= _update_chapters(t.hash, book, files)
-            changed |= _try_copy_book_cover(book, covers)
+            if _try_copy_book_cover(book, covers):
+                changed = True
             if _book_needs_online_cover(book):
                 search_ids.append(book.id)
 
@@ -166,22 +170,89 @@ def _release_has_chapters(release: Release) -> bool:
 
 
 # ============================================================
+# ЯДРО АКТУАЛИЗАЦИИ РАЗДАЧИ
+# ============================================================
+
+def actualize_release(db: Session, torrent_hash: str,
+                      release: Release) -> bool:
+    """
+    Приводит раздачу к целевой двухфазной схеме приоритетов.
+
+    Единая функция актуализации: её вызывают и очередной проход поллера
+    (см. _process_torrent), и эндпоинт запроса главы
+    (см. api/streaming.sync_chapter_status). Обе точки выполняют ровно одни
+    и те же действия — логика не разъезжается.
+
+    1. Догоняет статусы глав по данным торрента (по всем книгам раздачи).
+    2. Определяет фазу:
+       - фаза 1 — ни одна глава раздачи ещё не готова: качается ровно первая
+         глава раздачи, всё прочее в skip;
+       - фаза 2 — есть хотя бы одна готовая глава: качается вся раздача,
+         high на первую незагруженную главу, остальные аудио и обложки
+         томов в normal.
+    3. Приоритеты — один вызов set_file_priorities по всей раздаче.
+
+    Возвращает True, если какие-то статусы глав изменились.
+    """
+    files = manager.get_files(torrent_hash)
+    if not files:
+        return False
+
+    files_by_idx = {f.index: f for f in files}
+
+    # ---- 1. Догнать статусы глав ----
+    changed = False
+    for book in release.books:
+        if _update_chapters(book, files_by_idx):
+            changed = True
+
+    # ---- 2. Первая незагруженная глава ПО ВСЕЙ РАЗДАЧЕ ----
+    ordered = _ordered_chapters(release)
+    if not ordered:
+        return changed
+
+    first_pending = next(
+        (c for c in ordered if c.status != "ready"), None)
+    if first_pending is None:
+        log.info("release=%s: все главы раздачи скачаны, "
+                 "приоритеты не меняем", release.id)
+        return changed
+
+    # фаза 2 начинается, как только хоть одна глава раздачи готова
+    phase2 = any(c.status == "ready" for c in ordered)
+
+    log.info("release=%s: %s, high → ordinal=%d file_index=%d (status=%s)",
+             release.id, "фаза 2" if phase2 else "фаза 1",
+             first_pending.ordinal, first_pending.file_index,
+             first_pending.status)
+
+    # ---- 3. Приоритеты всей раздачи одним вызовом ----
+    _apply_priorities(torrent_hash, files, first_pending.file_index, phase2)
+    return changed
+
+
+def _ordered_chapters(release: Release) -> list[Chapter]:
+    """Главы всей раздачи в целевом порядке: books по ordinal -> chapters."""
+    result: list[Chapter] = []
+    for book in sorted(release.books, key=lambda b: b.ordinal):
+        result.extend(sorted(book.chapters, key=lambda c: c.ordinal))
+    return result
+
+
+# ============================================================
 # ОБНОВЛЕНИЕ СТАТУСОВ
 # ============================================================
 
-def _update_chapters(torrent_hash: str, book: Book, files) -> bool:
-    """
-    Обновляет статусы глав книги по данным из торрента.
-    Когда что-то стало ready — продвигает high на первую нескаченную.
-    """
-    chapters_by_idx = {c.file_index: c for c in book.chapters}
+def _update_chapters(book: Book, files_by_idx: dict) -> bool:
+    """Догоняет статусы глав книги по данным торрента.
 
+    files_by_idx — {file_index: TorrentFileInfo} по всей раздаче.
+    """
     changed = False
-    any_became_ready = False
 
-    for f in files:
-        chapter = chapters_by_idx.get(f.index)
-        if chapter is None:
+    for chapter in book.chapters:
+        f = files_by_idx.get(chapter.file_index)
+        if f is None:
             continue
 
         progress = float(f.progress)
@@ -190,7 +261,6 @@ def _update_chapters(torrent_hash: str, book: Book, files) -> bool:
             if chapter.status != "ready":
                 chapter.mark_ready()
                 changed = True
-                any_became_ready = True
 
         elif progress > 0:
             if chapter.status in ("absent", "downloading") or \
@@ -200,10 +270,9 @@ def _update_chapters(torrent_hash: str, book: Book, files) -> bool:
 
     if changed:
         book.recompute_status()
-
-    # переставляем high только когда что-то завершилось
-    if any_became_ready:
-        _advance_high(torrent_hash, book)
+        release = book.release
+        if release is not None:
+            release.recompute_status()
 
     return changed
 
@@ -212,63 +281,49 @@ def _update_chapters(torrent_hash: str, book: Book, files) -> bool:
 # ПРИОРИТЕТЫ
 # ============================================================
 
-def _advance_high(torrent_hash: str, book: Book) -> None:
+def _apply_priorities(torrent_hash: str, files,
+                      high_file_index: int, phase2: bool) -> None:
+    """Выставляет приоритеты по всей раздаче одним вызовом.
+
+    Фаза 1: high на первую главу раздачи; остальные аудио, обложки и прочий
+            мусор — skip (качается ровно одна глава).
+    Фаза 2: high на первую незагруженную главу; остальные аудио раздачи и
+            обложки томов — normal; прочий не-аудио мусор — skip.
+
+    Обложки (картинки) держим в normal и в фазе 1, и в фазе 2 — иначе файл
+    обложки тома не скачается и книга останется с временной обложкой.
+    Sequential выключен: порядок файлов раздачи не равен аудио-порядку глав,
+    порядок задают приоритеты.
     """
-    Ставит high на первую по ordinal нескаченную главу книги.
-
-    Логика:
-      - идём по главам в порядке ordinal;
-      - всё, что ready, пропускаем;
-      - первая с status != 'ready' получает priority_high;
-      - остальные аудио — normal, sequential on.
-
-    Если все главы ready — ничего не делаем.
-    """
-    sorted_chapters = sorted(book.chapters, key=lambda c: c.ordinal)
-
-    first_pending: Chapter | None = None
-    for c in sorted_chapters:
-        if c.status != "ready":
-            first_pending = c
-            break
-
-    if first_pending is None:
-        log.info("book=%s: все главы скачаны, приоритеты не меняем",
-                 book.id)
-        return
-
-    log.info("book=%s: high → ordinal=%d file_index=%d (status=%s)",
-             book.id, first_pending.ordinal, first_pending.file_index,
-             first_pending.status)
-
-    _apply_high(torrent_hash, first_pending.file_index)
-
-
-def _apply_high(torrent_hash: str, high_file_index: int) -> None:
-    """
-    Ставит high на указанный файл, normal на остальные аудио и файлы
-    обложек томов. Включает sequential download.
-    """
-    files = manager.get_files(torrent_hash)
-    if not files:
-        return
-
     audio_ids = [f.index for f in files if _is_audio(f.name)]
-    if not audio_ids or high_file_index not in audio_ids:
+    if high_file_index not in audio_ids:
         log.warning(">>> poller: file_index=%s не найден среди аудио %s",
                     high_file_index, torrent_hash[:8])
         return
 
-    # обложки томов качаем в normal, чтобы после загрузки книги
-    # файл картинки уже был на диске (cover_is_temp → своя обложка)
     image_ids = [f.index for f in files if is_image(f.name)]
+    other_ids = [f.index for f in files
+                 if not _is_audio(f.name) and not is_image(f.name)]
 
     high = [high_file_index]
-    normal = [i for i in audio_ids if i != high_file_index] + image_ids
+    if phase2:
+        normal = [i for i in audio_ids if i != high_file_index] + image_ids
+        low = other_ids
+    else:
+        normal = list(image_ids)
+        low = [i for i in audio_ids if i != high_file_index] + other_ids
 
-    manager.set_file_priorities(
-        torrent_hash, high=high, normal=normal, low=[])
-    manager.enable_sequential(torrent_hash, enabled=True)
+    # идемпотентность: если цель и фаза не изменились — не дёргаем клиент
+    key = (high_file_index, phase2)
+    if _last_priority.get(torrent_hash) == key:
+        return
+
+    ok = manager.set_file_priorities(
+        torrent_hash, high=high, normal=normal, low=low)
+    if ok:
+        _last_priority[torrent_hash] = key
+
+    manager.enable_sequential(torrent_hash, enabled=False)
 
 
 # ============================================================

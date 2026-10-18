@@ -56,6 +56,12 @@ interface ApiService {
     @POST("books/{book_id}/download")
     suspend fun startDownload(@Path("book_id") bookId: Int): DownloadStartedOut
 
+    @POST("releases/{release_id}/download")
+    suspend fun startReleaseDownload(
+        @Path("release_id") releaseId: Int,
+        @Query("book_id") bookId: Int? = null,
+    ): DownloadStartedOut
+
     @DELETE("books/{book_id}/download")
     suspend fun stopDownload(
         @Path("book_id") bookId: Int,

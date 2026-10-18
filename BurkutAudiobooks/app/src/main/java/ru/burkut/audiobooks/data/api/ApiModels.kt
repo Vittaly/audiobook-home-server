@@ -108,6 +108,8 @@ data class ReleaseOut(
     val size_bytes: Long? = null,
     val cover_url: String? = null,
     val added_at: String,
+    // Дата создания раздачи на трекере (может отсутствовать у старых записей/API).
+    val released_at: String? = null,
     val downloaded_at: String? = null,
     val last_accessed: String? = null,
 )
@@ -134,6 +136,8 @@ data class ReleaseDetailOut(
     val size_bytes: Long? = null,
     val cover_url: String? = null,
     val added_at: String,
+    // Дата создания раздачи на трекере (может отсутствовать у старых записей/API).
+    val released_at: String? = null,
     val downloaded_at: String? = null,
     val last_accessed: String? = null,
     val persons: List<PersonRef> = emptyList(),
@@ -215,8 +219,15 @@ data class HealthOut(
 
 @JsonClass(generateAdapter = true)
 data class DownloadStartedOut(
-    val book_id: Int,
-    val client_id: Int? = null,
+    // Идентификатор раздачи — основной объект загрузки; книги (одна или
+    // несколько) — производные от раздачи и на старте их может ещё не быть.
+    val release_id: Int? = null,
+    // При старте всей раздачи (POST /releases/{id}/download) книг может ещё не быть,
+    // сервер возвращает book_id: null, поэтому поле nullable.
+    val book_id: Int? = null,
+    // Сервер возвращает client_id как строку (хэш торрента у qBittorrent/Transmission),
+    // несмотря на openapi.yaml с типом integer.
+    val client_id: String? = null,
     val status: BookStatus,
     val save_path: String,
     val message: String,

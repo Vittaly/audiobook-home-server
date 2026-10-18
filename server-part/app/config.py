@@ -58,7 +58,7 @@ class Settings(BaseSettings):
 
     # qBittorrent
     QBITTORRENT_HOST: str = "127.0.0.1"
-    QBITTORRENT_PORT: int = 8080
+    QBITTORRENT_PORT: int = 8089
     QBITTORRENT_USER: str = "admin"
     QBITTORRENT_PASSWORD: str = "adminadmin"
 

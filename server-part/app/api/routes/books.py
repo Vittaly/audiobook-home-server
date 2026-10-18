@@ -79,6 +79,8 @@ def _release_book_to_out(book: Book, api_base: str) -> dict:
         "chapters_ready": sum(1 for c in chapters if c.status == "ready"),
         "total_duration_sec": duration,
         "size_bytes": size,
+        # признак «книга ещё не полностью определена»: данные могут измениться
+        "is_provisional": book.is_provisional,
         # cover_url всегда не-null: /books/{id}/cover отдаёт обложку или placeholder
         "cover_url": f"{api_base}/books/{book.id}/cover",
         "cover_is_temp": book.cover_is_temp,
@@ -113,6 +115,7 @@ def _release_to_out(release: Release, api_base: str) -> ReleaseOut:
         # cover_url всегда не-null: /releases/{id}/cover отдаёт обложку или placeholder
         cover_url=f"{api_base}/releases/{release.id}/cover",
         added_at=release.added_at,
+        released_at=release.released_at,
         downloaded_at=release.downloaded_at,
         last_accessed=release.last_accessed,
     )
@@ -155,6 +158,7 @@ def _book_to_out(book: Book, api_base: str) -> BookOut:
         chapters_ready=sum(1 for c in chapters if c.status == "ready"),
         total_duration_sec=duration,
         size_bytes=size,
+        is_provisional=book.is_provisional,
         cover_url=f"{api_base}/books/{book.id}/cover",
         cover_is_temp=book.cover_is_temp,
         added_at=release.added_at,

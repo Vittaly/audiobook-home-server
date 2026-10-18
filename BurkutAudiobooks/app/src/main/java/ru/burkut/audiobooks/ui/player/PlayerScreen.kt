@@ -1,13 +1,19 @@
 package ru.burkut.audiobooks.ui.player
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -24,7 +30,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -32,20 +37,28 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import kotlin.math.roundToInt
 import ru.burkut.audiobooks.R
 import ru.burkut.audiobooks.player.PlayerViewModel
 import ru.burkut.audiobooks.ui.util.formatDurationMs
@@ -60,6 +73,13 @@ fun PlayerScreen(
     val error by vm.error.collectAsState()
     val nextVolume by vm.requestNextVolume.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // Вход в окно плеера = книга в «быстрой» очереди; выход — её недокачанные
+    // главы уходят в медленную очередь с экспоненциальной задержкой.
+    DisposableEffect(Unit) {
+        vm.onPlayerScreenOpened()
+        onDispose { vm.onPlayerScreenClosed() }
+    }
 
     LaunchedEffect(error) {
         error?.let {
@@ -179,8 +199,12 @@ fun PlayerScreen(
                     },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(6.dp),
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(0.dp)),
                     strokeCap = StrokeCap.Butt,
+                    // Убираем «квадрат-стоп» в конце трека (артефакт M3).
+                    gapSize = 0.dp,
+                    drawStopIndicator = {},
                 )
 
                 Spacer(Modifier.height(20.dp))
@@ -203,7 +227,7 @@ fun PlayerScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Slider(
+                SquareSlider(
                     value = if (state.durationMs > 0) {
                         (state.positionMs.toFloat() / state.durationMs).coerceIn(0f, 1f)
                     } else 0f,
@@ -305,5 +329,77 @@ fun PlayerScreen(
                 }
             }
         }
+    }
+}
+
+/**
+ * Слайдер перемотки текущей главы в «квадратной» стилистике (без скруглений):
+ * прямой трек, квадратный заполненный прогресс и квадратный бегунок.
+ * Значение нормировано в диапазон 0..1.
+ */
+@Composable
+private fun SquareSlider(
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val fraction = value.coerceIn(0f, 1f)
+    var widthPx by remember { mutableStateOf(1) }
+    val density = LocalDensity.current
+    val trackHeight = 6.dp
+    val thumbSize = 14.dp
+    val thumbSizePx = with(density) { thumbSize.toPx() }
+    val trackHeightPx = with(density) { trackHeight.toPx() }
+    val accent = MaterialTheme.colorScheme.primary
+    val trackColor = MaterialTheme.colorScheme.onSurfaceVariant
+
+    fun update(x: Float) {
+        val travel = (widthPx - thumbSizePx).coerceAtLeast(1f)
+        onValueChange(((x - thumbSizePx / 2f) / travel).coerceIn(0f, 1f))
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(thumbSize)
+            .onSizeChanged { widthPx = it.width }
+            .pointerInput(enabled) {
+                if (!enabled) return@pointerInput
+                detectTapGestures { offset -> update(offset.x) }
+            }
+            .pointerInput(enabled) {
+                if (!enabled) return@pointerInput
+                detectDragGestures { change, _ ->
+                    change.consume()
+                    update(change.position.x)
+                }
+            },
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        // Прямой трек (без скруглений).
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(trackHeight)
+                .background(if (enabled) trackColor.copy(alpha = 0.35f) else trackColor.copy(alpha = 0.2f)),
+        )
+        // Заполненная часть — тоже квадратная.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(fraction)
+                .height(trackHeight)
+                .background(if (enabled) accent else trackColor.copy(alpha = 0.4f)),
+        )
+        // Квадратный бегунок.
+        Box(
+            modifier = Modifier
+                .offset {
+                    val travel = (widthPx - thumbSizePx).coerceAtLeast(0f)
+                    IntOffset((fraction * travel).roundToInt(), 0)
+                }
+                .size(thumbSize)
+                .background(if (enabled) accent else trackColor.copy(alpha = 0.4f)),
+        )
     }
 }

@@ -59,7 +59,7 @@ fun ReleaseDetailScreen(
     releaseId: Int,
     onBack: () -> Unit,
     onOpenBook: (Int) -> Unit,
-    onPlayRelease: (List<BookEntity>) -> Unit,
+    onPlayRelease: () -> Unit,
     vm: ReleaseDetailViewModel = viewModel(
         key = "release-$releaseId",
         factory = viewModelFactoryOfApp { app ->
@@ -210,7 +210,7 @@ fun ReleaseDetailScreen(
                                     Text("Скачать все тома")
                                 }
                             }
-                            TextButton(onClick = { onPlayRelease(state.books) }) {
+                            TextButton(onClick = onPlayRelease) {
                                 Text("Слушать")
                             }
                         }

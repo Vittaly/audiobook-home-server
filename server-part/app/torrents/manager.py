@@ -42,19 +42,38 @@ log = logging.getLogger(__name__)
 # ============================================================
 
 _backend: TorrentBackend | None = None
+_backend_error: Exception | None = None
 
 
 def _build_backend() -> TorrentBackend:
+    """Создаёт backend по TORRENT_BACKEND.
+
+    Зависимости клиента (qbittorrentapi/transmission-rpc) не входят в
+    requirements.txt безусловно — при их отсутствии поднимаем RuntimeError
+    с понятным текстом, а не сырой ModuleNotFoundError.
+    """
     # Единый источник истины о режиме — daemon.resolve_mode().
     kind = resolve_mode()
 
     if kind == "qbittorrent":
-        from app.torrents.backends.qbittorrent import QBittorrentBackend
+        try:
+            from app.torrents.backends.qbittorrent import QBittorrentBackend
+        except ModuleNotFoundError:
+            raise RuntimeError(
+                "TORRENT_BACKEND=qbittorrent, но модуль 'qbittorrentapi' "
+                "не установлен. Поставьте его: pip install qbittorrentapi"
+            ) from None
         log.info("Торрент-бэкенд: qbittorrent")
         return QBittorrentBackend()
 
     if kind == "transmission":
-        from app.torrents.backends.transmission import TransmissionBackend
+        try:
+            from app.torrents.backends.transmission import TransmissionBackend
+        except ModuleNotFoundError:
+            raise RuntimeError(
+                "TORRENT_BACKEND=transmission, но модуль 'transmission-rpc' "
+                "не установлен. Поставьте его: pip install transmission-rpc"
+            ) from None
         log.info("Торрент-бэкенд: transmission")
         return TransmissionBackend()
 
@@ -64,15 +83,23 @@ def _build_backend() -> TorrentBackend:
 
 
 def get_backend() -> TorrentBackend:
-    global _backend
+    global _backend, _backend_error
+    if _backend is None and _backend_error is None:
+        try:
+            _backend = _build_backend()
+        except Exception as e:
+            _backend_error = e
+            log.error("Не удалось создать торрент-бэкенд: %s", e)
     if _backend is None:
-        _backend = _build_backend()
+        raise RuntimeError(
+            f"Торрент-бэкенд недоступен: {_backend_error}")
     return _backend
 
 
 def reset_backend() -> None:
-    global _backend
+    global _backend, _backend_error
     _backend = None
+    _backend_error = None
 
 
 def backend_name() -> str:
@@ -123,11 +150,15 @@ async def fetch_torrent_bytes(source_url: str | None) -> bytes | None:
 
     m = _TORRENT_ID_RE.search(source_url)
     if not m:
-        log.warning("fetch_torrent_bytes: нет torrent_id в %r", source_url)
+        log.warning("fetch_torrent_bytes: нет torrent_id в source_url")
         return None
 
     torrent_id = m.group(1)
     url = _RUTOR_DL_URL.format(torrent_id=torrent_id)
+    # Referer строим из torrent_id, а не из сырого source_url: в URL
+    # раздачи может быть кириллица/«ёлочки», а httpx кодирует значения
+    # заголовков как ASCII и падает с UnicodeEncodeError.
+    referer = f"{settings.RUTOR_BASE_URL}/torrent/{torrent_id}"
     log.info("fetch_torrent_bytes: GET %s", url)
 
     try:
@@ -140,12 +171,15 @@ async def fetch_torrent_bytes(source_url: str | None) -> bytes | None:
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/122.0.0.0 Safari/537.36"
                 ),
-                "Referer": source_url,
+                "Referer": referer,
                 "Accept": "application/x-bittorrent, */*",
             },
         ) as client:
             r = await client.get(url)
-    except httpx.HTTPError as e:
+    except Exception as e:
+        # Ловим шире httpx.HTTPError: сюда попадают, например,
+        # UnicodeEncodeError при построении заголовков — тогда
+        # сработает fallback на magnet в start_download.
         log.warning("fetch_torrent_bytes: сеть — %s", e)
         return None
 
@@ -260,11 +294,25 @@ def _wait_and_prioritize(torrent_hash: str,
 # СВЯЗЬ
 # ============================================================
 
+# время последнего предупреждения о недоступности (throttle)
+_last_ping_warn: float = 0.0
+
+
 def ping() -> bool:
+    """Проверка доступности торрент-клиента.
+
+    poller опрашивает раз в несколько секунд, поэтому при недоступности
+    пишем предупреждение не чаще раза в минуту и без трейса — иначе лог
+    заваливается идентичными ошибками.
+    """
+    global _last_ping_warn
     try:
         return get_backend().ping()
-    except Exception:
-        log.exception("ping")
+    except Exception as e:
+        now = time.monotonic()
+        if now - _last_ping_warn >= 60.0:
+            _last_ping_warn = now
+            log.warning("Торрент-клиент недоступен: %s", e)
         return False
 
 
@@ -415,7 +463,10 @@ def prioritize_for_stream(torrent_hash: str,
              torrent_hash[:8], high, len(normal), len(low))
 
     if ok:
-        enable_sequential(torrent_hash, enabled=True)
+        # Sequential отключён: файловый порядок в раздаче не равен аудио-
+        # порядку глав, поэтому sequential качает стартовую главу последней.
+        # Вместо него порядок задают приоритеты (high на текущий файл).
+        enable_sequential(torrent_hash, enabled=False)
     return ok
 
 

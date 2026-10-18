@@ -15,7 +15,7 @@ import logging
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from app.api.streaming import serve_chapter
+from app.api.streaming import serve_chapter, sync_chapter_status
 from app.catalog import service
 from app.db.session import get_db
 from app.lifecycle import activity
@@ -45,6 +45,11 @@ def stream_chapter(
     activity.touch_chapter(db, book_id, chapter_id, action="stream")
     db.commit()
 
+    # Глава может быть готова в торрент-клиенте, но поллер ещё не успел
+    # обновить статус в БД. Проверяем синхронно, чтобы не задерживать
+    # старт воспроизведения на интервал поллинга.
+    chapter = sync_chapter_status(chapter, db)
+
     log.info("stream: book=%s chapter=%s status=%s range=%s",
              book_id, chapter_id, chapter.status, range_header)
 
@@ -65,5 +70,7 @@ def stream_chapter_head(
     chapter = service.get_chapter_full(db, chapter_id)
     if chapter is None or chapter.book_id != book_id:
         raise HTTPException(404, "chapter not found")
+
+    chapter = sync_chapter_status(chapter, db)
 
     return serve_chapter(chapter, None)

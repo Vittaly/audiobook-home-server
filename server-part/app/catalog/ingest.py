@@ -78,6 +78,12 @@ async def sync_catalog(covers: CoverService) -> int:
     except asyncio.TimeoutError:
         log.warning(">>> sync_catalog: прерван по таймауту %d сек", timeout)
         return 0
+    except asyncio.CancelledError:
+        # Иногда wait_for пробрасывает CancelledError внутренней задачи вместо
+        # TimeoutError (особенно при остановке планировщика). Это ожидаемое
+        # событие, а не ошибка — логируем и завершаемся.
+        log.info(">>> sync_catalog: отменён")
+        return 0
 
 
 async def _sync_catalog_inner(covers: CoverService) -> int:
@@ -125,27 +131,66 @@ async def _sync_catalog_inner(covers: CoverService) -> int:
 
 async def _process_item(item: dict, covers: CoverService,
                         sem: asyncio.Semaphore) -> int:
+    """
+    Обрабатывает одну запись поисковой выдачи (upsert карточки,
+    дозаполнение деталей и обложки).
+
+    ВАЖНО про блокировки SQLite (WAL): карточку upsert'им и КОММИТИМ
+    отдельной короткой транзакцией, а сетевые запросы (детальная страница,
+    обложка) выполняем ПОСЛЕ коммита, когда write-лок уже освобождён.
+
+    Если держать write-лок (взятый на db.flush() в _upsert_release) через
+    await'ы сети, другой пишущий — поллер торрентов — ждёт до
+    busy_timeout=30с и падает с "database is locked": статусы глав не
+    становятся ready, стриминг отдаёт 409, плеер клиента висит в ожидании.
+    """
     with _sync_session() as db:
         release = _upsert_release(db, item)
         if release is None:
             return 0
+        release_id = release.id
+        need_details = (release.description is None
+                        and bool(item.get("source_url")))
+        need_cover = release.cover_cache_path is None
+    # write-лок освобождён: _sync_session уже закоммитил upsert
 
-        # --- детальная: описание, рубрики, чтец, обложка-URL ---
-        if release.description is None and item.get("source_url"):
-            raw = await _fetch_details(sem, item["source_url"])
-            if raw:
-                _apply_release_update(db, release, raw)
+    # --- детальная страница (сеть без открытого write-лока) ---
+    if need_details:
+        raw = await _fetch_details(sem, item["source_url"])
+        if raw:
+            with _sync_session() as db:
+                rel = db.get(Release, release_id)
+                if rel is not None:
+                    _apply_release_update(db, rel, raw)
 
-        # --- обложка карточки: трекер → интернет ---
-        if release.cover_cache_path is None:
-            await _ensure_cover(sem, release, covers)
+    # --- обложка карточки (сеть без открытого write-лока) ---
+    if need_cover:
+        with _sync_session() as db:
+            rel = db.get(Release, release_id)
+            if rel is not None:
+                await _ensure_cover(sem, rel, covers)
 
-        return 1
+    return 1
 
 
 # ============================================================
 # UPSERT КАРТОЧКИ РАЗДАЧИ
 # ============================================================
+
+def _parse_tracker_date(value: str | None) -> datetime:
+    """Дата создания раздачи на трекере ('YYYY-MM-DD') -> datetime (UTC).
+
+    Если дата отсутствует или некорректна — текущее время (UTC), чтобы
+    NOT NULL-поле released_at всегда было заполнено.
+    """
+    if value:
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").replace(
+                tzinfo=timezone.utc)
+        except ValueError:
+            log.warning(">>> ingest: некорректная дата трекера: %r", value)
+    return datetime.now(timezone.utc)
+
 
 def _upsert_release(db: Session, item: dict) -> Release | None:
     """item нормализован rutor.fetch_search_page: title, author, year готовы."""
@@ -157,6 +202,10 @@ def _upsert_release(db: Session, item: dict) -> Release | None:
 
     if release is not None:
         release.last_seen_at = datetime.now(timezone.utc)
+        # Легаси-запись без даты трекера: заполняем один раз. Уже
+        # установленную дату не трогаем, чтобы не сбрасывать её при обходе.
+        if release.released_at is None:
+            release.released_at = _parse_tracker_date(item.get("added_at"))
         return release
 
     # Раздача без torrent_hash непригодна для скачивания — пропускаем,
@@ -191,6 +240,7 @@ def _upsert_release(db: Session, item: dict) -> Release | None:
             magnet=item["magnet"],
             save_path=str(settings.downloads_dir / sanitize_name(title)),
             content_type=item["content_type"],
+            released_at=_parse_tracker_date(item.get("added_at")),
         )
         db.add(release)
         db.flush()
@@ -212,34 +262,7 @@ def _upsert_release(db: Session, item: dict) -> Release | None:
     release.last_seen_at = datetime.now(timezone.utc)
     db.flush()
 
-    # пока структура торрента неизвестна — в раздаче одна книга-«заглушка»
-    _ensure_single_book(db, release)
-
     return release
-
-
-def _ensure_single_book(db: Session, release: Release) -> Book:
-    """
-    Гарантирует, что у раздачи есть хотя бы одна книга.
-    До скана структуры это одна «книга-заглушка» с ordinal=1 и
-    названием из карточки. После ingest_release книги пересоздаются
-    по фактической структуре торрента.
-    """
-    if release.books:
-        return release.books[0]
-
-    book = Book(
-        release_id=release.id,
-        ordinal=1,
-        folder=None,
-        title=release.title,
-        title_norm=release.title_norm,
-        title_raw=release.title_raw,
-        status=BookStatus.ANNOUNCED.value,
-    )
-    db.add(book)
-    db.flush()
-    return book
 
 
 # ============================================================
@@ -402,11 +425,19 @@ def ingest_release(release_id: int, files: list[dict], torrent_name: str,
         ])
 
         created = 0
-        # удаляем «книгу-заглушку», если она осталась без глав
+
+        # Удаляем только книги, которых больше нет в структуре торрента:
+        # без глав и чей folder не встречается среди реальных групп.
+        actual_folders = {g.get("folder") for g in groups}
         for old in list(release.books):
-            if not old.chapters:
+            if not old.chapters and old.folder not in actual_folders:
                 db.delete(old)
         db.flush()
+        # после удаления коллекция release.books устарела: удалённые объекты
+        # всё ещё в ней, и _upsert_book_from_group может переиспользовать
+        # удалённую книгу → при вставке глав будет FOREIGN KEY constraint
+        # failed. Перечитываем коллекцию из БД.
+        db.expire(release, ["books"])
 
         for i, group in enumerate(groups):
             book = _upsert_book_from_group(

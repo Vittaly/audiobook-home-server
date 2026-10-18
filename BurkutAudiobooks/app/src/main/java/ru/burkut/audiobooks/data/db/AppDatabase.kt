@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         BookEntity::class,
         ChapterEntity::class,
     ],
-    version = 2,
+    version = 5,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -82,6 +82,40 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** Версия 3: локальная длительность глав (измеряется клиентом по аудиофайлу). */
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "ALTER TABLE chapters ADD COLUMN localDurationSec INTEGER"
+                )
+            }
+        }
+
+        /** Версия 4: серия книги в кэше (для фильтрации каталога по сериям). */
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE books ADD COLUMN seriesId INTEGER")
+                database.execSQL("ALTER TABLE books ADD COLUMN seriesTitle TEXT")
+                database.execSQL("ALTER TABLE books ADD COLUMN seriesOrder INTEGER")
+            }
+        }
+
+        /**
+         * Версия 5: дата релиза с трекера (releasedAt).
+         *
+         * Для уже закэшированных раздач заполняем releasedAt значением addedAt:
+         * порядок карточек не «прыгнет» до следующей синхронизации, а после
+         * неё придёт реальная дата трекера.
+         */
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE releases ADD COLUMN releasedAt TEXT")
+                database.execSQL(
+                    "UPDATE releases SET releasedAt = addedAt WHERE releasedAt IS NULL"
+                )
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -89,7 +123,9 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "audiobooks.db",
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(
+                        MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
+                    )
                     .build()
                     .also { instance = it }
             }

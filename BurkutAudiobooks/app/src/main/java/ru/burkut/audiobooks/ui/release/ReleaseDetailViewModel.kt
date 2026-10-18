@@ -65,6 +65,10 @@ class ReleaseDetailViewModel(
                     releaseId,
                     app.serverMonitor.availability.value == ServerAvailability.Online,
                 )
+                // После сетевого обновления гарантированно актуализируем тома
+                // (Flow observeBooks может не успеть до нажатия «Слушать»).
+                val books = repository.getBooksByRelease(releaseId)
+                _state.update { it.copy(books = books, release = repository.getReleaseEntity(releaseId)) }
             } catch (e: Exception) {
                 _state.update { it.copy(error = e.message) }
             } finally {

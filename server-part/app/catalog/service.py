@@ -61,9 +61,10 @@ def list_releases(db: Session, *,
     ).scalar_one()
 
     sort_col = {
-        "added_at": Release.added_at,
-        "title":    Release.title,
-        "year":     Release.year,
+        "added_at":    Release.added_at,
+        "released_at": Release.released_at,
+        "title":       Release.title,
+        "year":        Release.year,
     }.get(sort, Release.added_at)
     if order == "desc":
         sort_col = sort_col.desc()
@@ -141,9 +142,10 @@ def list_books(db: Session, *,
     ).scalar_one()
 
     sort_col = {
-        "added_at": Release.added_at,
-        "title":    Book.title,
-        "year":     Release.year,
+        "added_at":    Release.added_at,
+        "released_at": Release.released_at,
+        "title":       Book.title,
+        "year":        Release.year,
     }.get(sort, Release.added_at)
     if order == "desc":
         sort_col = sort_col.desc()

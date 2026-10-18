@@ -79,11 +79,14 @@ fun AppContent() {
                         releaseId = releaseId,
                         onBack = { navController.popBackStack() },
                         onOpenBook = { id -> navController.navigate("book/$id") },
-                        onPlayRelease = { books ->
-                            books.firstOrNull()?.let { book ->
-                                playerVm.playBook(book.id)
-                                navController.navigate("player")
-                            }
+                        onPlayRelease = {
+                            // Играем ВСЮ раздачу с самого начала, не зная заранее
+                            // сколько в ней книг. Загрузку стартуем на уровне раздачи:
+                            // сервер не создаёт книгу-заглушку, книги появляются
+                            // только по факту сканирования структуры торрента.
+                            android.util.Log.d("MainActivity", "onPlayRelease releaseId=$releaseId")
+                            playerVm.playRelease(releaseId)
+                            navController.navigate("player")
                         },
                     )
                 }

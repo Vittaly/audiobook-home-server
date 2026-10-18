@@ -24,7 +24,11 @@ data class ReleaseEntity(
     val totalDurationSec: Int? = null,
     val sizeBytes: Long? = null,
     val coverUrl: String? = null,
+    // Время индексации карточки на сервере (ISO-8601).
     val addedAt: String,
+    // Дата создания раздачи на трекере (ISO-8601). Основная дата каталога:
+    // по ней идёт сортировка «сначала новые» и её показываем на карточке.
+    val releasedAt: String? = null,
     val downloadedAt: String? = null,
     val lastAccessed: String? = null,
     // Пометка: раздача поставлена в фоновую докачку на устройство.
@@ -53,6 +57,10 @@ data class BookEntity(
     val coverIsTemp: Boolean = false,
     val addedAt: String,
     val lastAccessed: String? = null,
+    // Серия книги (заполняется из карточки раздачи при загрузке томов).
+    val seriesId: Int? = null,
+    val seriesTitle: String? = null,
+    val seriesOrder: Int? = null,
     // Локальный статус загрузки главы на устройство.
     val localStatus: String = "absent", // absent | downloading | partial | ready
     val downloadedBytes: Long = 0,
@@ -73,4 +81,7 @@ data class ChapterEntity(
     // Локальный статус: скачана ли на устройство эта глава.
     val localStatus: String = "absent", // absent | downloading | partial | ready
     val downloadedBytes: Long = 0,
+    // Реальная длительность, измеренная клиентом по содержимому аудиофайла.
+    // Сервер не знает длительности глав — поэтому приоритет у этого поля.
+    val localDurationSec: Int? = null,
 )
