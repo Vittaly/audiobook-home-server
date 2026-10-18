@@ -76,23 +76,4 @@ class ReleaseDetailViewModel(
             }
         }
     }
-
-    /** Поставить раздачу целиком (все тома) в фоновую загрузку на устройство. */
-    fun queueDownload() {
-        viewModelScope.launch {
-            repository.setReleaseQueued(releaseId, true)
-            val base = app.settings.baseUrlOrNull()
-            if (base != null) {
-                app.downloadQueue.enqueueRelease(releaseId, base)
-            }
-            _state.update { it.copy(queued = true) }
-        }
-    }
-
-    fun cancelQueue() {
-        viewModelScope.launch {
-            repository.setReleaseQueued(releaseId, false)
-            _state.update { it.copy(queued = false) }
-        }
-    }
 }

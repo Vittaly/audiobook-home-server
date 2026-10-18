@@ -103,6 +103,7 @@ class ServerMonitor(
         // 3. Никого не нашли — оффлайн.
         if (_availability.value != ServerAvailability.Offline) {
             _availability.value = ServerAvailability.Offline
+            onOffline()
         }
     }
 
@@ -129,8 +130,16 @@ class ServerMonitor(
         onServerOnline?.invoke(baseUrl)
     }
 
+    private fun onOffline() {
+        // Хук для паузы фоновой загрузки при потере сервера.
+        onServerOffline?.invoke()
+    }
+
     /** Вызывается, когда сервер стал доступен. Устанавливается App.kt. */
     var onServerOnline: ((String) -> Unit)? = null
+
+    /** Вызывается, когда сервер стал недоступен. Устанавливается App.kt. */
+    var onServerOffline: (() -> Unit)? = null
 
     companion object {
         private const val PROBE_INTERVAL_MS = 10_000L

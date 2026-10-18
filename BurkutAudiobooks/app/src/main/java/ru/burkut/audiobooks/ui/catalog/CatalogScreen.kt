@@ -48,6 +48,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import ru.burkut.audiobooks.data.db.ReleaseEntity
 import ru.burkut.audiobooks.ui.appInstance
+import ru.burkut.audiobooks.ui.theme.serverOnlineColor
 import ru.burkut.audiobooks.ui.util.formatReleaseDate
 import ru.burkut.audiobooks.ui.util.formatSeconds
 import ru.burkut.audiobooks.ui.viewModelFactoryOf
@@ -75,7 +76,7 @@ fun CatalogScreen(
                     if (isServerOnline) {
                         Surface(
                             shape = CircleShape,
-                            color = MaterialTheme.colorScheme.primary,
+                            color = serverOnlineColor(),
                             modifier = Modifier
                                 .padding(end = 8.dp)
                                 .size(10.dp),

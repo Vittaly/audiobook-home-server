@@ -22,6 +22,13 @@ class BookStorage(context: Context) {
     fun partFile(bookId: Int, ordinal: Int): File =
         File(bookDir(bookId), "$ordinal.mp3.part")
 
+    /** Локальный файл обложки книги (кэшируется, пока сервер доступен). */
+    fun coverFile(bookId: Int): File = File(bookDir(bookId), "cover.jpg")
+
+    /** Локальный файл обложки раздачи (запасной вариант, если у книги нет своей). */
+    fun releaseCoverFile(releaseId: Int): File =
+        File(root, "release-$releaseId-cover.jpg")
+
     fun isChapterReady(chapter: ChapterEntity): Boolean {
         val f = chapterFile(chapter.bookId, chapter.ordinal)
         return f.exists() && f.length() > 0
@@ -30,6 +37,15 @@ class BookStorage(context: Context) {
     fun isBookReady(book: BookEntity, chapters: List<ChapterEntity>): Boolean {
         return chapters.isNotEmpty() && chapters.all { isChapterReady(it) }
     }
+
+    /**
+     * Состав воспроизводимого плейлиста — это задача источника, а не плеера.
+     * Онлайн: все главы (недостающие докачает очередь, плеер стартует на растущем .part).
+     * Оффлайн: только те, чей готовый `.mp3` реально лежит на диске — плеер не должен
+     * ждать файлов, которых нет и не появятся.
+     */
+    fun playableChapters(chapters: List<ChapterEntity>, online: Boolean): List<ChapterEntity> =
+        if (online) chapters else chapters.filter { isChapterReady(it) }
 
     /** Файл, который нужно отдавать плееру для главы: если растущий — .part, иначе готовый .mp3. */
     fun playbackFile(bookId: Int, ordinal: Int): File {

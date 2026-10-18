@@ -55,6 +55,7 @@ import ru.burkut.audiobooks.data.api.BookStatus
 import ru.burkut.audiobooks.data.db.BookEntity
 import ru.burkut.audiobooks.player.absoluteUrl
 import ru.burkut.audiobooks.ui.appInstance
+import ru.burkut.audiobooks.ui.theme.serverOnlineColor
 import ru.burkut.audiobooks.ui.util.formatBytes
 import ru.burkut.audiobooks.ui.util.formatDurationMs
 import ru.burkut.audiobooks.ui.util.formatSeconds
@@ -125,10 +126,6 @@ fun BookDetailScreen(
                     baseUrl = baseUrl,
                     padding = padding,
                     onPlay = { onPlay(state.book!!.id) },
-                    onStartServerDownload = vm::startServerDownload,
-                    onStopServerDownload = vm::stopServerDownload,
-                    onQueue = vm::queueReleaseDownload,
-                    onCancelQueue = vm::cancelQueue,
                     onDelete = { confirmDelete = true },
                 )
             }
@@ -163,10 +160,6 @@ private fun BookDetailContent(
     baseUrl: String?,
     padding: PaddingValues,
     onPlay: () -> Unit,
-    onStartServerDownload: () -> Unit,
-    onStopServerDownload: () -> Unit,
-    onQueue: () -> Unit,
-    onCancelQueue: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val book = state.book!!
@@ -293,11 +286,6 @@ private fun BookDetailContent(
                     Spacer(Modifier.size(4.dp))
                     Text("Слушать")
                 }
-                if (state.queued) {
-                    TextButton(onClick = onCancelQueue) { Text("Отменить очередь") }
-                } else {
-                    TextButton(onClick = onQueue) { Text("Скачать (раздача)") }
-                }
             }
         }
 
@@ -326,24 +314,8 @@ private fun BookDetailContent(
                                 "${formatBytes(dl.downloaded_bytes)} / ${formatBytes(dl.total_bytes)}",
                                 style = MaterialTheme.typography.bodySmall,
                             )
-                            Spacer(Modifier.height(8.dp))
-                            TextButton(onClick = onStopServerDownload) { Text("Остановить") }
                         }
                     }
-                }
-            }
-        }
-
-        // ---------- Запросить загрузку на сервере (только для «announced») ----------
-        if (state.serverStatus == BookStatus.announced && online) {
-            item {
-                TextButton(onClick = onStartServerDownload) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_download),
-                        contentDescription = null,
-                    )
-                    Spacer(Modifier.size(4.dp))
-                    Text("Подготовить книгу на сервере")
                 }
             }
         }
@@ -383,7 +355,7 @@ private fun ServerStatusRow(online: Boolean) {
         Surface(
             shape = CircleShape,
             color = if (online) {
-                MaterialTheme.colorScheme.primary
+                serverOnlineColor()
             } else {
                 MaterialTheme.colorScheme.error
             },

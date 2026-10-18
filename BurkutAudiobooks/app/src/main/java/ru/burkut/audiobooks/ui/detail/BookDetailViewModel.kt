@@ -43,7 +43,6 @@ class BookDetailViewModel(
     private val app: App = application as App
     private val repository = app.repository
     private val storage = app.storage
-    private val downloadQueue = app.downloadQueue
 
     private val _state = MutableStateFlow(BookDetailUiState())
     val state: StateFlow<BookDetailUiState> = _state.asStateFlow()
@@ -138,45 +137,6 @@ class BookDetailViewModel(
     private fun stopServerPolling() {
         pollJob?.cancel()
         pollJob = null
-    }
-
-    /** Запросить у сервера начало загрузки книги (торрент). */
-    fun startServerDownload() {
-        viewModelScope.launch {
-            try {
-                repository.startDownload(bookId)
-                refreshServerStatus()
-            } catch (e: Exception) {
-                _state.update { it.copy(error = e.message) }
-            }
-        }
-    }
-
-    fun stopServerDownload() {
-        viewModelScope.launch {
-            runCatching { repository.stopDownload(bookId) }
-            _state.update { it.copy(serverDownload = null) }
-            refresh()
-        }
-    }
-
-    /** Поставить раздачу (все тома) в фоновую докачку на устройство. */
-    fun queueReleaseDownload() {
-        viewModelScope.launch {
-            val book = _state.value.book ?: return@launch
-            repository.setReleaseQueued(book.releaseId, true)
-            val base = app.settings.baseUrlOrNull()
-            if (base != null) downloadQueue.enqueueRelease(book.releaseId, base)
-            _state.update { it.copy(queued = true) }
-        }
-    }
-
-    fun cancelQueue() {
-        viewModelScope.launch {
-            val book = _state.value.book ?: return@launch
-            repository.setReleaseQueued(book.releaseId, false)
-            _state.update { it.copy(queued = false) }
-        }
     }
 
     /** Удалить локальные файлы книги с устройства (сам торрент на сервере не трогаем). */

@@ -41,3 +41,14 @@ fun AppTheme(content: @Composable () -> Unit) {
         content = content,
     )
 }
+
+/**
+ * Цвет индикатора «сервер доступен».
+ *
+ * Акцентная палитра темы бежево-коричневая (в тёмной теме `primary` —
+ * светло-бежевый `#D7CCC8`), поэтому индикатор, окрашенный в `primary`,
+ * выглядел белым. Здесь задан явный зелёный, различимый в обеих темах.
+ */
+@Composable
+fun serverOnlineColor(): Color =
+    if (isSystemInDarkTheme()) Color(0xFF81C784) else Color(0xFF2E7D32)

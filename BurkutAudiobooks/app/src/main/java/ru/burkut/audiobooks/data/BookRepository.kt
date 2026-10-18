@@ -124,6 +124,9 @@ class BookRepository(
 
     suspend fun getBookEntity(id: Int): BookEntity? = catalogDao.getBook(id)
 
+    /** Все книги кэша (для разовой догрузки недостающих обложек). */
+    suspend fun getAllBooks(): List<BookEntity> = catalogDao.getAllBooks()
+
     suspend fun getChapters(bookId: Int): List<ChapterEntity> = catalogDao.getChapters(bookId)
 
     fun observeChapters(bookId: Int) = catalogDao.observeChapters(bookId)

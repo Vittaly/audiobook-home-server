@@ -71,6 +71,7 @@ data class DownloadQueueState(
 class DownloadQueue(
     private val repository: BookRepository,
     private val storage: BookStorage,
+    private val coverStore: CoverStore,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -365,6 +366,9 @@ class DownloadQueue(
 
     /** Поставить раздачу целиком: для каждого тома берём главы из кэша и качаем. */
     suspend fun enqueueRelease(releaseId: Int, baseUrl: String) {
+        // Обложку раздачи кладём в локальный кэш, пока сервер доступен —
+        // она понадобится плееру оффлайн (как запасная, если у книги нет своей).
+        coverStore.ensureReleaseCover(releaseId)
         val books = repository.getBooksByRelease(releaseId, excludeBookId = -1)
         for (book in books) {
             val chapters = repository.getChapters(book.id)
@@ -474,6 +478,10 @@ class DownloadQueue(
         val chapters = repository.getChapters(bookId)
         val allReady = chapters.isNotEmpty() && chapters.all { storage.isChapterReady(it) }
         val book = repository.getBookEntity(bookId)
+        // Обложку книги кэшируем локально, пока сервер доступен: оффлайн
+        // плеер берёт её из файла и не обращается к серверу. Идемпотентно —
+        // если файл уже есть, запрос не делается.
+        coverStore.ensureBookCover(bookId, force = book?.coverIsTemp == true)
         if (allReady && book != null) {
             repository.updateBookLocal(bookId, "ready", book.sizeBytes ?: 0, book.sizeBytes ?: 0)
             _onBookReady.value = bookId to (book.title)

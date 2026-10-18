@@ -1,4 +1,4 @@
-package ru.burkut.audiobooks.ui.player
+ package ru.burkut.audiobooks.ui.player
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -61,6 +61,7 @@ import coil.compose.AsyncImage
 import kotlin.math.roundToInt
 import ru.burkut.audiobooks.R
 import ru.burkut.audiobooks.player.PlayerViewModel
+import ru.burkut.audiobooks.ui.theme.serverOnlineColor
 import ru.burkut.audiobooks.ui.util.formatDurationMs
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -121,7 +122,9 @@ fun PlayerScreen(
             AsyncImage(
                 model = state.artUri,
                 contentDescription = null,
-                contentScale = ContentScale.Crop,
+                // Обложку показываем целиком: серверные обложки книг бывают
+                // не квадратными, и Crop обрезал бы у них края.
+                contentScale = ContentScale.Fit,
                 modifier = Modifier
                     .padding(top = 8.dp)
                     .fillMaxWidth(0.72f)
@@ -286,7 +289,7 @@ fun PlayerScreen(
                 Surface(
                     shape = CircleShape,
                     color = if (state.isServerOnline) {
-                        MaterialTheme.colorScheme.primary
+                        serverOnlineColor()
                     } else {
                         MaterialTheme.colorScheme.error
                     },

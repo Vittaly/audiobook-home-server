@@ -18,7 +18,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -42,11 +41,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
-import ru.burkut.audiobooks.R
 import ru.burkut.audiobooks.data.db.BookEntity
 import ru.burkut.audiobooks.ui.appInstance
 import ru.burkut.audiobooks.ui.util.formatBytes
@@ -203,32 +200,13 @@ fun ReleaseDetailScreen(
                     }
 
                     item {
-                        // Кнопка загрузки раздачи целиком.
+                        // Кнопка запуска прослушивания раздачи.
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 16.dp, vertical = 4.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            if (state.queued) {
-                                TextButton(onClick = vm::cancelQueue) {
-                                    Icon(
-                                        Icons.Default.Check,
-                                        contentDescription = null,
-                                        modifier = Modifier.padding(end = 4.dp),
-                                    )
-                                    Text("В очереди — отменить")
-                                }
-                            } else {
-                                TextButton(onClick = vm::queueDownload) {
-                                    Icon(
-                                        painterResource(R.drawable.ic_download),
-                                        contentDescription = null,
-                                        modifier = Modifier.padding(end = 4.dp),
-                                    )
-                                    Text("Скачать все тома")
-                                }
-                            }
                             TextButton(onClick = onPlayRelease) {
                                 Text("Слушать")
                             }

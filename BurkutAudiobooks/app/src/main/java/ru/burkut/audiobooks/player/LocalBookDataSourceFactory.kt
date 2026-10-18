@@ -6,6 +6,7 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.TransferListener
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -23,6 +24,8 @@ import java.util.concurrent.ConcurrentHashMap
 @UnstableApi
 class LocalBookDataSourceFactory(
     private val resolveFile: (bookId: Int, ordinal: Int) -> File,
+    /** Доступен ли сервер: оффлайн источник не ждёт появления файла, а падает сразу. */
+    private val isOnline: () -> Boolean = { true },
 ) : DataSource.Factory {
 
     private val targetLengths = ConcurrentHashMap<String, Long>()
@@ -43,6 +46,12 @@ class LocalBookDataSourceFactory(
             val parsed = parseUri(dataSpec.uri.path) ?: return local.open(dataSpec)
             val (bookId, ordinal) = parsed
             val file = resolveFile(bookId, ordinal)
+            // Источник сам решает, доступна ли глава: если файла нет и сервер
+            // оффлайн — ждать нечего, падаем сразу, а не висим 30 секунд в
+            // GrowingFileDataSource на несуществующем .part.
+            if (!isOnline() && !(file.exists() && file.length() > 0)) {
+                throw IOException("Глава недоступна локально, сервер оффлайн: ${file.path}")
+            }
             val isPart = file.path.endsWith(".part")
             val target = targetLengths[key(bookId, ordinal)] ?: -1L
             val length = if (isPart && target > 0) target else C.LENGTH_UNSET.toLong()

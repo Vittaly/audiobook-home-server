@@ -47,6 +47,10 @@ interface CatalogDao {
     @Query("SELECT * FROM books WHERE id = :id")
     suspend fun getBook(id: Int): BookEntity?
 
+    /** Все книги кэша (для разовой догрузки недостающих обложек). */
+    @Query("SELECT * FROM books")
+    suspend fun getAllBooks(): List<BookEntity>
+
     @Query("SELECT * FROM books WHERE releaseId = :releaseId ORDER BY ordinal")
     suspend fun getBooksByRelease(releaseId: Int): List<BookEntity>
 

@@ -15,6 +15,7 @@ import ru.burkut.audiobooks.data.db.AppDatabase
 import ru.burkut.audiobooks.data.settings.Settings
 import ru.burkut.audiobooks.notifications.BookNotificationHelper
 import ru.burkut.audiobooks.player.BookStorage
+import ru.burkut.audiobooks.player.CoverStore
 import ru.burkut.audiobooks.player.DownloadQueue
 import ru.burkut.audiobooks.player.LocalBookDataSourceFactory
 
@@ -33,6 +34,10 @@ class App : Application() {
         private set
 
     lateinit var storage: BookStorage
+        private set
+
+    /** Локальный кэш обложек книг/раздач (для показа в оффлайне). */
+    lateinit var coverStore: CoverStore
         private set
 
     lateinit var downloadQueue: DownloadQueue
@@ -65,11 +70,18 @@ class App : Application() {
         repository = BookRepository(apiProvider, db.playbackDao(), db.catalogDao())
 
         storage = BookStorage(this)
-        downloadQueue = DownloadQueue(repository, storage)
+        coverStore = CoverStore(apiProvider, repository, storage)
+        downloadQueue = DownloadQueue(repository, storage, coverStore)
         notificationHelper = BookNotificationHelper(this)
-        localDataSourceFactory = LocalBookDataSourceFactory { bookId, ordinal ->
-            storage.playbackFile(bookId, ordinal)
-        }
+        localDataSourceFactory = LocalBookDataSourceFactory(
+            resolveFile = { bookId, ordinal -> storage.playbackFile(bookId, ordinal) },
+            // Источник знает доступность сервера и оффлайн не ждёт файлов,
+            // которых нет и не появятся.
+            isOnline = {
+                serverMonitor.availability.value ==
+                    ru.burkut.audiobooks.data.ServerAvailability.Online
+            },
+        )
 
         serverMonitor = ServerMonitor(this, settings, repository)
 
@@ -79,11 +91,21 @@ class App : Application() {
         serverMonitor.onServerOnline = { baseUrl ->
             appScope.launch {
                 downloadQueue.setServerAvailable(true)
+                // Догружаем обложки уже скачанных книг: книги, загруженные до
+                // появления кэша обложек, тоже должны показываться оффлайн.
+                coverStore.warmUpReadyBooks()
                 val queued = repository.getQueuedReleases()
                 for (release in queued) {
                     downloadQueue.enqueueRelease(release.id, baseUrl)
                 }
             }
+        }
+
+        // Сервер пропал в процессе работы — ставим очередь загрузки на паузу.
+        // Плеер и источник читают доступность динамически, так что оффлайн
+        // воспроизведение продолжит работать с локальными файлами.
+        serverMonitor.onServerOffline = {
+            downloadQueue.setServerAvailable(false)
         }
 
         // «Книга готова» — уведомление по завершении загрузки книги на устройство.
