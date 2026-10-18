@@ -442,8 +442,16 @@ def _book_needs_online_cover(book: Book) -> bool:
     ретраев, и файл-картинка из торрента либо не заявлен вовсе (нет hint),
     либо заявлен, но книга уже готова, а файла так и не появилось —
     значит его нет в раздаче, ищем онлайн.
+
+    Поиск по книге имеет смысл только для многотомных раздач: у однократных
+    нет своей обложки тома в принципе, и их обложкой занимается уровень
+    раздачи (_ensure_cover: трекер → интернет).
     """
     if book.cover_cache_path is not None or not book.cover_is_temp:
+        return False
+
+    release = book.release
+    if release is None or len(release.books) <= 1:
         return False
 
     if (book.cover_retry_count or 0) >= settings.COVER_RETRY_LIMIT:

@@ -1,9 +1,11 @@
 package ru.burkut.audiobooks.data.api
 
 import okhttp3.ResponseBody
+import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.DELETE
 import retrofit2.http.GET
+import retrofit2.http.HEAD
 import retrofit2.http.POST
 import retrofit2.http.Path
 import retrofit2.http.Query
@@ -52,6 +54,16 @@ interface ApiService {
 
     @GET("books/{book_id}/cover")
     suspend fun getCover(@Path("book_id") bookId: Int): ResponseBody
+
+    /**
+     * Лёгкая проверка обложки: HEAD /books/{id}/cover отдаёт заголовки без
+     * тела. Заголовок X-Cover-Temp == "true" означает, что обложка ещё
+     * временная (можно её получить позже), его отсутствие — финал.
+     */
+    @HEAD("books/{book_id}/cover")
+    suspend fun headCover(
+        @Path("book_id") bookId: Int,
+    ): Response<ResponseBody>
 
     @POST("books/{book_id}/download")
     suspend fun startDownload(@Path("book_id") bookId: Int): DownloadStartedOut

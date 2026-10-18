@@ -53,28 +53,17 @@ class DownloadResult:
 # START
 # ============================================================
 
-def _is_multi_release(release: Release | None) -> bool:
-    """Многотомная раздача: несколько книг или явный хинт серии."""
-    if release is None:
-        return False
-    if release.content_type == "series":
-        return True
-    if release.books_hint and release.books_hint > 1:
-        return True
-    return len(release.books) > 1
-
-
-def _apply_temp_cover(book: Book, release: Release | None) -> None:
+def _apply_temp_cover(book: Book) -> None:
     """
-    При старте загрузки книги многотомной раздачи без своей обложки
-    включаем признак временной обложки: пока торрент качается и своя
-    обложка не получена (файл докачан или найден онлайн), клиент
-    показывает обложку карточки-раздачи.
+    При старте загрузки книги без своей обложки включаем признак временной
+    обложки: пока торрент качается и своя обложка не получена (файл докачан
+    или найден онлайн), клиент показывает обложку карточки-раздачи —
+    осмысленную картинку, а не заглушку.
     """
     if book.cover_cache_path:
         book.cover_is_temp = False
         return
-    book.cover_is_temp = _is_multi_release(release)
+    book.cover_is_temp = True
 
 
 async def start(db: Session, book_id: int) -> DownloadResult:
@@ -115,7 +104,7 @@ async def start(db: Session, book_id: int) -> DownloadResult:
                   book_id, release.torrent_hash[:8])
         book.status = BookStatus.DOWNLOADING.value
         release.status = BookStatus.DOWNLOADING.value
-        _apply_temp_cover(book, release)
+        _apply_temp_cover(book)
         activity.touch(db, book.id, "download")
         db.commit()
         # save_path и client_id берём из фактического торрента в клиенте —
@@ -163,7 +152,7 @@ async def start(db: Session, book_id: int) -> DownloadResult:
     # сейчас даём клиенту быстрый отклик: карточка и книга — downloading
     book.status = BookStatus.DOWNLOADING.value
     release.status = BookStatus.DOWNLOADING.value
-    _apply_temp_cover(book, release)
+    _apply_temp_cover(book)
     activity.touch(db, book.id, "download")
     db.commit()
 
@@ -213,7 +202,7 @@ async def start_release(db: Session, release_id: int,
         release.status = BookStatus.DOWNLOADING.value
         for b in release.books:
             b.status = BookStatus.DOWNLOADING.value
-            _apply_temp_cover(b, release)
+            _apply_temp_cover(b)
         target_id = book_id or (release.books[0].id if release.books else None)
         if target_id is not None:
             activity.touch(db, target_id, "download")
@@ -260,7 +249,7 @@ async def start_release(db: Session, release_id: int,
     release.status = BookStatus.DOWNLOADING.value
     for b in release.books:
         b.status = BookStatus.DOWNLOADING.value
-        _apply_temp_cover(b, release)
+        _apply_temp_cover(b)
     target_id = book_id or (release.books[0].id if release.books else None)
     if target_id is not None:
         activity.touch(db, target_id, "download")

@@ -43,6 +43,34 @@ fun formatReleaseDate(iso: String?): String? {
     return "$day.$month.$year"
 }
 
+/**
+ * Разобранное описание раздачи: [intro] — основной текст, [contents] — пункты
+ * перечня из встроенного блока «Содержание».
+ */
+data class ParsedDescription(
+    val intro: String,
+    val contents: List<String>,
+)
+
+/**
+ * Разбирает `release.description`. Сервер сохраняет «Описание» трекера целиком,
+ * включая встроенный блок вида `... Содержание: 1. Первый\n2. Второй ...`.
+ * Выделяем этот блок: [ParsedDescription.intro] — текст до метки, а
+ * [ParsedDescription.contents] — отдельные пункты (каждый с новой строки).
+ */
+fun parseReleaseDescription(description: String?): ParsedDescription? {
+    if (description.isNullOrBlank()) return null
+    val marker = Regex("(?i)содержание\\s*:?")
+    val m = marker.find(description)
+        ?: return ParsedDescription(description.trim(), emptyList())
+    val intro = description.substring(0, m.range.first).trim()
+    val contents = description.substring(m.range.last + 1)
+        .split('\n')
+        .map { it.trim().trimStart('-', '·', '•').trim() }
+        .filter { it.isNotEmpty() }
+    return ParsedDescription(intro, contents)
+}
+
 fun formatBytes(bytes: Long): String {
     val kb = bytes / 1024.0
     return when {

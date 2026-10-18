@@ -41,7 +41,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
@@ -71,37 +70,16 @@ fun CatalogScreen(
             TopAppBar(
                 title = { Text("Раздачи") },
                 actions = {
-                    // Зелёный индикатор доступа к серверу.
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(end = 4.dp),
-                    ) {
-                        if (isServerOnline) {
-                            Surface(
-                                shape = CircleShape,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier
-                                    .size(10.dp)
-                                    .align(Alignment.CenterVertically),
-                            ) {}
-                            Text(
-                                "Сервер доступен",
-                                style = MaterialTheme.typography.labelSmall,
-                                modifier = Modifier.padding(start = 6.dp),
-                            )
-                        } else {
-                            Surface(
-                                shape = CircleShape,
-                                color = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.size(10.dp),
-                            ) {}
-                            Text(
-                                "Оффлайн",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.padding(start = 6.dp),
-                            )
-                        }
+                    // Индикатор доступа к серверу без надписи: яркий зелёный круг,
+                    // когда сервер доступен; в автономном режиме — ничего.
+                    if (isServerOnline) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .padding(end = 8.dp)
+                                .size(10.dp),
+                        ) {}
                     }
                     IconButton(onClick = vm::refresh) {
                         Icon(Icons.Default.Refresh, contentDescription = "Обновить")
@@ -141,7 +119,6 @@ fun CatalogScreen(
                 onQueryChange = vm::setQuery,
                 onRubricChange = vm::setRubric,
                 onSeriesChange = vm::setSeries,
-                onSortChange = vm::setSort,
                 onReset = vm::resetFilters,
             )
 
@@ -211,7 +188,6 @@ private fun CatalogFiltersBar(
     onQueryChange: (String) -> Unit,
     onRubricChange: (String?) -> Unit,
     onSeriesChange: (Int?) -> Unit,
-    onSortChange: (CatalogSort) -> Unit,
     onReset: () -> Unit,
 ) {
     Column(
@@ -236,33 +212,10 @@ private fun CatalogFiltersBar(
                 }
             },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp),
         )
-
-        // Сортировка.
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Сортировка",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(
-                selected = filters.sort == CatalogSort.DATE_DESC,
-                onClick = { onSortChange(CatalogSort.DATE_DESC) },
-                label = { Text("Сначала новые") },
-            )
-            FilterChip(
-                selected = filters.sort == CatalogSort.TITLE_ASC,
-                onClick = { onSortChange(CatalogSort.TITLE_ASC) },
-                label = { Text("По названию") },
-            )
-            FilterChip(
-                selected = filters.sort == CatalogSort.YEAR_DESC,
-                onClick = { onSortChange(CatalogSort.YEAR_DESC) },
-                label = { Text("По году") },
-            )
-        }
 
         // Фильтр по рубрикам (категориям).
         if (availableRubrics.isNotEmpty()) {
@@ -337,9 +290,7 @@ private fun ReleaseCard(
                 model = release.coverUrl,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .size(72.dp)
-                    .clip(CircleShape),
+                modifier = Modifier.size(72.dp),
             )
             Column(
                 modifier = Modifier

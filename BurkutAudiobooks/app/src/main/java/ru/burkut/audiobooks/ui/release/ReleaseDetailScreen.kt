@@ -51,6 +51,7 @@ import ru.burkut.audiobooks.data.db.BookEntity
 import ru.burkut.audiobooks.ui.appInstance
 import ru.burkut.audiobooks.ui.util.formatBytes
 import ru.burkut.audiobooks.ui.util.formatSeconds
+import ru.burkut.audiobooks.ui.util.parseReleaseDescription
 import ru.burkut.audiobooks.ui.viewModelFactoryOfApp
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -157,13 +158,31 @@ fun ReleaseDetailScreen(
                                 }
                             }
 
-                            release.description?.let {
-                                Spacer(Modifier.height(8.dp))
-                                Text(
-                                    it,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
+                            parseReleaseDescription(release.description)?.let { desc ->
+                                if (desc.intro.isNotEmpty()) {
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(
+                                        desc.intro,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                if (desc.contents.isNotEmpty()) {
+                                    Spacer(Modifier.height(8.dp))
+                                    // «Содержание» — заголовок, каждый пункт перечня — с новой строки.
+                                    Text(
+                                        "Содержание",
+                                        style = MaterialTheme.typography.titleSmall,
+                                    )
+                                    Spacer(Modifier.height(4.dp))
+                                    desc.contents.forEach { line ->
+                                        Text(
+                                            "• $line",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
                             }
 
                             if (showOfflineHint) {

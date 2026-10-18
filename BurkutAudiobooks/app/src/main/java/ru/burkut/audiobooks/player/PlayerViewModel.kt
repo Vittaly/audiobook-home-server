@@ -83,6 +83,22 @@ class PlayerViewModel(application: Application) : ViewModel() {
     /** Книга, открытая в полноэкранном плеере (для promote/demote очереди). */
     private var playerScreenBookId: Int? = null
 
+    /**
+     * Текущий URL обложки для UI. Хранится отдельно от mediaMetadata, потому
+     * что финальная обложка появляется уже после старта воспроизведения:
+     * [coverPollJob] опрашивает сервер и обновляет URL (с cache-busting nonce),
+     * а навигация по медиа не пересоздаётся — поэтому snapshot() берёт artUri
+     * именно отсюда, а не из mediaMetadata.
+     */
+    private var currentCoverUrl: String? = null
+
+    /**
+     * Опрос готовности финальной обложки (HEAD /books/{id}/cover). Пока сервер
+     * отдаёт признак X-Cover-Temp, обновляем URL с nonce, чтобы Coil перечитал
+     * картинку; как только признак снят — фиксируем финал и выходим.
+     */
+    private var coverPollJob: Job? = null
+
     private val controllerFuture: com.google.common.util.concurrent.ListenableFuture<MediaController> =
         MediaController.Builder(
             context,
@@ -205,6 +221,10 @@ class PlayerViewModel(application: Application) : ViewModel() {
                 prev.copy(
                     isPlaying = controller.playWhenReady && controller.isPlaying,
                     isBuffering = controller.playbackState == Player.STATE_BUFFERING,
+                    // Пока готовится новая книга, прежний controller уже очищен
+                    // (clearMediaItems), поэтому artUri не должен «протекать» из
+                    // метаданных предыдущего трека — источник только currentCoverUrl.
+                    artUri = currentCoverUrl ?: prev.artUri,
                 )
             } else {
                 prev.copy(
@@ -213,7 +233,11 @@ class PlayerViewModel(application: Application) : ViewModel() {
                     isBuffering = controller.playbackState == Player.STATE_BUFFERING,
                     title = item?.mediaMetadata?.artist?.toString(),      // книга
                     artist = item?.mediaMetadata?.title?.toString(),      // глава
-                    artUri = item?.mediaMetadata?.artworkUri?.toString(),
+                    // Обложку держим отдельно: финальная версия приходит уже
+                    // после старта воспроизведения (опрос coverPollJob), а
+                    // mediaMetadata.artworkUri остаётся исходным. Если опрошенного
+                    // URL ещё нет — падаем на обложку из метаданных.
+                    artUri = currentCoverUrl ?: item?.mediaMetadata?.artworkUri?.toString(),
                     positionMs = controller.currentPosition,
                     // ExoPlayer периодически отдаёт C.TIME_UNSET (<= 0) при
                     // буферизации/переходе. Не сбрасываем длительность в 0 —
@@ -349,6 +373,8 @@ class PlayerViewModel(application: Application) : ViewModel() {
 
         prepareJob?.cancel()
         retryJob?.cancel()
+        // Новая раздача: сбрасываем обложку прежней книги и её опрос.
+        resetCurrentCover()
 
         prepareJob = viewModelScope.launch {
             try {
@@ -383,6 +409,10 @@ class PlayerViewModel(application: Application) : ViewModel() {
             )
         }
 
+        // Книг ещё нет — сразу показываем обложку карточки-раздачи, чтобы
+        // окно плеера не оставалось пустым во время подготовки.
+        applyReleaseCover(releaseId)
+
         // Сообщаем серверу о начале загрузки всей раздачи (POST /releases/{id}/download).
         val started = runCatching {
             Log.d(TAG, "startReleaseDownload POST /releases/$releaseId/download")
@@ -416,6 +446,8 @@ class PlayerViewModel(application: Application) : ViewModel() {
                     playLocal(firstBook.id, chapters, null)
                     return
                 }
+                // Книга уже появилась, глав ещё нет — показываем её обложку.
+                applyBookCover(firstBook.id)
             }
             delay(SERVER_PREPARE_POLL_MS)
         }
@@ -446,6 +478,8 @@ class PlayerViewModel(application: Application) : ViewModel() {
     fun onPlayerScreenClosed() {
         val bookId = playerScreenBookId
         playerScreenBookId = null
+        // Плеер закрыт — зачем продолжать опрашивать обложку в фоне.
+        coverPollJob?.cancel()
         if (bookId != null) {
             downloadQueue.demoteBook(bookId)
         }
@@ -464,6 +498,8 @@ class PlayerViewModel(application: Application) : ViewModel() {
 
         prepareJob?.cancel()
         retryJob?.cancel()
+        // Новая книга: сбрасываем обложку прежней книги и её опрос.
+        resetCurrentCover()
 
         prepareJob = viewModelScope.launch {
             try {
@@ -513,6 +549,7 @@ class PlayerViewModel(application: Application) : ViewModel() {
 
         prepareJob?.cancel()
         retryJob?.cancel()
+        coverPollJob?.cancel()
 
         if (controllerFuture.isDone) {
             runCatching { controllerFuture.get().release() }
@@ -581,6 +618,8 @@ class PlayerViewModel(application: Application) : ViewModel() {
                 offlineQueued = false,
             )
         }
+        // Пока ждём главы — показываем обложку книги, как только она известна.
+        applyBookCover(bookId)
 
         // Сообщаем серверу о начале загрузки (POST /books/{id}/download).
         val started = runCatching {
@@ -610,6 +649,8 @@ class PlayerViewModel(application: Application) : ViewModel() {
                 playLocal(bookId, chapters, chapterOrdinal)
                 return
             }
+            // Главы ещё не созданы — держим обложку актуальной по мере синка.
+            applyBookCover(bookId)
             // Страховка: если книга-карточка (announced-заглушка) была
             // заменена сервером на другую книгу той же раздачи (например,
             // структура торрента оказалась иной), переключаемся на неё —
@@ -685,6 +726,15 @@ class PlayerViewModel(application: Application) : ViewModel() {
         val book = repository.getBookEntity(bookId)
         val coverUri = book?.coverUrl?.let { Uri.parse(it) }
 
+        // Обложку показываем сразу (карточка раздачи — временная), а финальную
+        // (из торрента либо из интернета) подхватываем опросом заголовков.
+        currentCoverUrl = book?.coverUrl
+        if (book?.coverIsTemp == true) {
+            startCoverPolling(bookId, book.coverUrl)
+        } else {
+            coverPollJob?.cancel()
+        }
+
         // Для растущих .part-файлов сообщаем фабрике целевой размер главы —
         // GrowingFileDataSource должен знать, когда глава закончится.
         for (ch in chapters) {
@@ -733,6 +783,96 @@ class PlayerViewModel(application: Application) : ViewModel() {
         controller.play()
         _state.update { it.copy(preparing = false) }
         updateBookProgress()
+    }
+
+    /**
+     * Опрашивает готовность финальной обложки, пока сервер отдаёт временную
+     * (заголовок X-Cover-Temp). Каждую итерацию запрашивает только заголовки
+     * (HEAD /books/{id}/cover), а не карточку книги и не саму картинку. Пока
+     * обложка временная — обновляет [currentCoverUrl] тем же URL с cache-busting
+     * nonce (Coil перечитывает картинку), как только признак снят — фиксирует
+     * финальный URL и выходит. Ошибки сети не фатальны: просто повторим позже.
+     */
+    private fun startCoverPolling(bookId: Int, initialCoverUrl: String?) {
+        coverPollJob?.cancel()
+        if (initialCoverUrl == null) return
+        coverPollJob = viewModelScope.launch {
+            var attempt = 0
+            while (isActive && attempt < COVER_POLL_MAX_ATTEMPTS) {
+                val isTemp = repository.coverIsTemp(bookId)
+                if (isTemp == false) {
+                    // Финал: подставляем финальный URL и прекращаем опрос.
+                    currentCoverUrl = coverUrlWithNonce(initialCoverUrl)
+                    return@launch
+                }
+                if (isTemp == true) {
+                    currentCoverUrl = coverUrlWithNonce(initialCoverUrl)
+                }
+                attempt++
+                delay(COVER_POLL_INTERVAL_MS)
+            }
+        }
+    }
+
+    /** Дописывает cache-busting nonce, чтобы Coil перечитал обложку. */
+    private fun coverUrlWithNonce(url: String): String {
+        val sep = if (url.contains('?')) '&' else '?'
+        return "$url${sep}v=${System.currentTimeMillis()}"
+    }
+
+    /**
+     * Пока книга готовится (глав ещё нет), держим в UI обложку этой книги, как
+     * только сервер её отдал: не перетираем уже показанную обложку и запускаем
+     * опрос финальной версии, если текущая — временная.
+     */
+    private suspend fun applyBookCover(bookId: Int) {
+        val b = repository.getBookEntity(bookId) ?: return
+        // Своя обложка книги; если сервер ещё не отдал её URL — подстраховываемся
+        // обложкой раздачи (карточки), чтобы плеер не оставался пустым.
+        val url = b.coverUrl
+            ?: repository.getReleaseEntity(b.releaseId)?.coverUrl
+            ?: return
+        if (currentCoverUrl.isNullOrEmpty()) {
+            currentCoverUrl = url
+            _state.update { it.copy(artUri = url) }
+        }
+        if (b.coverIsTemp) {
+            if (coverPollJob?.isActive != true) startCoverPolling(bookId, url)
+        } else {
+            coverPollJob?.cancel()
+        }
+    }
+
+    /**
+     * Пока книга раздачи ещё не появилась (сервер создаёт книги по факту
+     * сканирования торрента, книгу-заглушку не делает), держим в UI обложку
+     * карточки-раздачи — чтобы окно плеера не оставалось пустым. Уже
+     * показанную обложку не перетираем: у книги приоритет.
+     */
+    private suspend fun applyReleaseCover(releaseId: Int) {
+        if (!currentCoverUrl.isNullOrEmpty()) return
+        val url = repository.getReleaseEntity(releaseId)?.coverUrl ?: return
+        currentCoverUrl = url
+        _state.update { it.copy(artUri = url) }
+    }
+
+    /**
+     * Сброс обложки при старте новой книги/раздачи: останавливаем прежний опрос,
+     * очищаем URL, а также синхронно чистим медиаэлементы контроллера. Иначе во
+     * время ожидания (спиннер) в плеере продолжала бы показываться обложка
+     * предыдущей книги: либо из currentCoverUrl, либо из artworkUri ещё не
+     * выгруженного старого трека. Обложка новой книги появится в playLocal() —
+     * сначала временная (карточка раздачи), затем финальная.
+     */
+    private fun resetCurrentCover() {
+        coverPollJob?.cancel()
+        coverPollJob = null
+        currentCoverUrl = null
+        controllerOrNull?.let { c ->
+            c.stop()
+            c.clearMediaItems()
+        }
+        _state.update { it.copy(artUri = null) }
     }
 
     /**
@@ -841,6 +981,10 @@ class PlayerViewModel(application: Application) : ViewModel() {
         private const val CHAPTER_READY_TIMEOUT_MS = 20_000L
         /** Период опроса готовности файла главы. */
         private const val CHAPTER_READY_POLL_MS = 250L
+        /** Период опроса готовности финальной обложки. */
+        private const val COVER_POLL_INTERVAL_MS = 5_000L
+        /** Предохранитель: максимум итераций опроса обложки (≈10 минут). */
+        private const val COVER_POLL_MAX_ATTEMPTS = 120
     }
 }
 

@@ -398,9 +398,9 @@ def ingest_release(release_id: int, files: list[dict], torrent_name: str,
         иначе сохраняет cover_path_hint для последующей докачки;
       - определяет серию (глобально по каталогу).
 
-    У многотомных раздач (len(groups) > 1) книга без своей обложки получает
-    cover_is_temp=True: пока своя обложка не получена (файл докачан или
-    найден онлайн), клиент видит обложку карточки-раздачи.
+    Книга без своей обложки получает cover_is_temp=True: пока своя обложка
+    не получена (файл из торрента докачан или найден онлайн), клиент видит
+    обложку карточки-раздачи — осмысленную картинку, а не заглушку.
 
     Возвращает количество созданных глав.
     """
@@ -441,7 +441,7 @@ def ingest_release(release_id: int, files: list[dict], torrent_name: str,
 
         for i, group in enumerate(groups):
             book = _upsert_book_from_group(
-                db, release, i + 1, group, covers, is_multi=is_multi)
+                db, release, i + 1, group, covers)
             if book is None:
                 continue
             created += _append_chapters(book, release, group)
@@ -457,8 +457,7 @@ def ingest_release(release_id: int, files: list[dict], torrent_name: str,
 
 
 def _upsert_book_from_group(db: Session, release: Release, ordinal: int,
-                            group: dict, covers: CoverService,
-                            is_multi: bool = False) -> Book | None:
+                            group: dict, covers: CoverService) -> Book | None:
     """Находит или создаёт книгу раздачи по folder, заполняет поля и обложку."""
     title = group.get("title") or release.title
     title_norm = _norm(title)
@@ -508,11 +507,10 @@ def _upsert_book_from_group(db: Session, release: Release, ordinal: int,
             return book
 
     # --- своей обложки нет ---
-    # у многотомной раздачи показываем обложку карточки, пока свою не получим
-    if is_multi:
-        book.cover_is_temp = True
-    else:
-        book.cover_is_temp = False
+    # Показываем обложку карточки-раздачи как временную (cover_is_temp=True)
+    # до тех пор, пока не получим свою: файл из торрента либо обложку из
+    # интернета. Так клиент всегда видит осмысленную картинку, а не заглушку.
+    book.cover_is_temp = True
 
     return book
 

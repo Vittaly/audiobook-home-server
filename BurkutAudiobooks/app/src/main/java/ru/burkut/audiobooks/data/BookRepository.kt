@@ -148,6 +148,24 @@ class BookRepository(
         }
     }
 
+    /**
+     * Лёгкая проверка: финальная ли обложка книги.
+     *
+     * Делает HEAD /books/{id}/cover и читает заголовок X-Cover-Temp: пока он
+     * "true", сервер отдаёт временную обложку (раздачи), финальной ещё нет.
+     * Возвращает:
+     *   true  — обложка временная (нужно продолжать опрос);
+     *   false — обложка финальная (опрос можно остановить);
+     *   null  — проверить не удалось (сервер недоступен/ошибка).
+     */
+    suspend fun coverIsTemp(bookId: Int): Boolean? = try {
+        val resp = apiProvider.get().headCover(bookId)
+        resp.headers()["X-Cover-Temp"]?.equals("true", ignoreCase = true)
+            ?: false
+    } catch (e: Exception) {
+        null
+    }
+
     // ---------- Локальное состояние загрузки главы ----------
 
     suspend fun updateChapterLocal(chapterId: Int, status: String, downloaded: Long) {
