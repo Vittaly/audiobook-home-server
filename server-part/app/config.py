@@ -76,7 +76,7 @@ class Settings(BaseSettings):
 
     # --- Transmission daemon ---
     TRANSMISSION_AUTOSTART: bool = True        # поднимать демон самим
-    TRANSMISSION_BIN: str = "C:\\Program Files\\Transmission\\transmission-qt.exe"                  # путь к exe (пусто = автопоиск)
+    TRANSMISSION_BIN: str = ""                  # путь к демону (пусто = автопоиск по ОС)
     TRANSMISSION_CONFIG_DIR: str = ""           # путь к settings.json (пусто = по ОС)
     TRANSMISSION_START_TIMEOUT_SEC: int = 30    # сколько ждать порт после старта
 

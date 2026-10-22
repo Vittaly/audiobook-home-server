@@ -1064,7 +1064,127 @@ python-libtorrent
 
 ---
 
-## 14. Порядок реализации
+## 14. Linux — установка и запуск
+
+Сервер полностью поддерживает headless Linux (без графического интерфейса).
+
+### 14.1. Зависимости
+
+```bash
+# Python 3.12+
+sudo apt update && sudo apt install -y python3 python3-pip python3-venv
+
+# Опционально — торрент-клиент (на выбор)
+sudo apt install -y qbittorrent-nox        # headless
+# sudo apt install -y transmission-daemon   # альтернатива
+
+# Настройка виртуального окружения (рекомендуется)
+cd server-part
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 14.2. Настройка внешнего диска
+
+В `DATA_DIR` задаётся абсолютный путь к папке со всеми данными (БД, загрузки, обложки, логи).
+
+**Пример — смонтированный диск `/mnt/storage`:**
+
+```bash
+mkdir -p /mnt/storage/audiobook-data
+```
+
+```ini
+# .env
+DATA_DIR=/mnt/storage/audiobook-data
+```
+
+Если диск нужно монтировать автоматически — добавьте запись в `/etc/fstab`:
+
+```
+/dev/sdb1  /mnt/storage  ext4  defaults,noatime  0  2
+```
+
+Все поддиректории (`downloads/`, `covers/`, `tmp/`, `app.sqlite`, `app.log`) создаются автоматически при первом запуске. Никаких дополнительных настроек не требуется.
+
+Если `DATA_DIR` оставить как `data` (относительный путь), данные будут в подпапке `server-part/data/`.
+
+### 14.3. Автозапуск через systemd
+
+```bash
+# Установка юнита
+cp deploy/audiobook-server.service /etc/systemd/system/
+sudo systemctl daemon-reload
+
+# Включение и запуск
+sudo systemctl enable --now audiobook-server
+
+# Статус
+sudo systemctl status audiobook-server
+
+# Логи
+sudo journalctl -u audiobook-server -f
+# или (пишется ещё и в data/app.log)
+tail -f /mnt/storage/audiobook-data/app.log
+```
+
+**Важно:** отредактируйте `/etc/systemd/system/audiobook-server.service` под вашего пользователя и пути:
+
+| Поле | Значение по умолчанию |
+|------|----------------------|
+| `User=` / `Group=` | `vit` / `vit` |
+| `WorkingDirectory=` | `/home/vit/audiobook-home-server/server-part` |
+| `ExecStart=` | `/home/vit/audiobook-home-server/.venv/bin/python3 main.py` (venv в корне проекта) |
+
+**Виртуальное окружение и systemd:** systemd **не активирует** venv автоматически. В `ExecStart` нужно указывать полный путь к python из venv, например `/home/vit/audiobook-home-server/.venv/bin/python3`. Если venv не используется — замените на `/usr/bin/python3`.
+
+### 14.4. Скрипт быстрого управления
+
+```bash
+./manage.sh start     # запуск (через systemd или в фоне)
+./manage.sh stop      # остановка
+./manage.sh status    # статус, PID, health-проверка
+./manage.sh logs      # лог в real-time (tail -f)
+./manage.sh install   # установка systemd-юнита из deploy/
+./manage.sh auto      # установка + автозапуск
+```
+
+Если `systemd` доступен — `manage.sh` использует его. Иначе запускает процесс в фоне с PID-файлом.
+
+### 14.5. Торрент-клиент на Linux
+
+#### qbittorrent-nox (рекомендуется)
+
+```ini
+TORRENT_BACKEND=qbittorrent
+QBITTORRENT_AUTOSTART=true
+QBITTORRENT_BIN=                     # пусто = автопоиск
+```
+
+Сервер найдёт `qbittorrent-nox` в `/usr/bin/`, `/usr/local/bin/`, `/snap/bin/`, запустит его с `--webui-port 8080` и будет ждать, пока WebUI станет доступен.
+
+#### transmission-daemon
+
+```ini
+TORRENT_BACKEND=transmission
+TRANSMISSION_AUTOSTART=true
+TRANSMISSION_BIN=                    # пусто = автопоиск
+```
+
+Сервер найдёт `transmission-daemon`, подготовит `settings.json` (rpc-port, download-dir и т.д.) и запустит его.
+
+### 14.6. Кросс-платформенность
+
+Все изменения для Linux **не ломают** поддержку Windows. В коде сохранены ветки `if _SYSTEM == "Windows"`:
+
+- [`app/torrents/daemon.py`](server-part/app/torrents/daemon.py) — разные пути к бинарным файлам, флаги создания процессов
+- [`app/catalog/layout.py`](server-part/app/catalog/layout.py) — санитайзер имён файлов (защита FAT/NTFS-символов безвредна на Linux)
+- `DATA_DIR` принимает как относительные, так и абсолютные пути на любой ОС
+
+---
+
+## 15. Порядок реализации
 
 1. `app/config.py`, `app/logging_setup.py`, `app/db/models.py`, `app/db/session.py`.
 2. `main.py` — каркас, `/health`, пустой планировщик. Проверить единый лог.
@@ -1084,6 +1204,6 @@ python-libtorrent
 
 ---
 
-## 15. Итог
+## 16. Итог
 
 Сервер — единый Python-процесс с in-process libtorrent, реляционной БД SQLite, REST API, совместимым с ExoPlayer, и mDNS-анонсом в локальной сети. Клиент на Android находит сервер автоматически, получает каталог, запускает загрузку и стримит главы с progressive download: сервер отдаёт поток максимально быстро с диска (если готово) или из libtorrent (если качается), клиент пишет файл и играет из него. Обложки скачиваются сразу при парсинге и не зависят от трекера. TTL-очистка удаляет неиспользуемое, не трогая pinned-книги. Вся активность — в одном логе с именами модулей.

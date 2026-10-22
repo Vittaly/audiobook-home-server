@@ -412,6 +412,8 @@ class TransmissionDaemon(TorrentClientDaemon):
             Path(settings.TRANSMISSION_BIN) if settings.TRANSMISSION_BIN else None,
             Path("/usr/bin/transmission-daemon"),
             Path("/usr/local/bin/transmission-daemon"),
+            Path("/usr/sbin/transmission-daemon"),
+            Path("/usr/local/sbin/transmission-daemon"),
             Path("/snap/bin/transmission-daemon"),
         ]
 
@@ -466,14 +468,15 @@ class QBittorrentDaemon(TorrentClientDaemon):
                 Path("/Applications/qBittorrent.app/Contents/MacOS/qBittorrent"),
                 Path("/Applications/qbittorrent.app/Contents/MacOS/qbittorrent"),
             ]
-        # Linux и прочие
+        # Linux и прочие (headless — qbittorrent-nox)
         return [
             Path(settings.QBITTORRENT_BIN) if settings.QBITTORRENT_BIN else None,
             Path("/usr/bin/qbittorrent-nox"),
             Path("/usr/local/bin/qbittorrent-nox"),
+            Path("/usr/local/sbin/qbittorrent-nox"),
+            Path("/snap/bin/qbittorrent-nox"),
             Path("/usr/bin/qbittorrent"),
             Path("/usr/local/bin/qbittorrent"),
-            Path("/snap/bin/qbittorrent-nox"),
             Path("/snap/bin/qbittorrent"),
         ]
 
@@ -494,6 +497,58 @@ class QBittorrentDaemon(TorrentClientDaemon):
         # stderr GUI-версии собираем (PIPE) — по нему диагностируем падение.
         return not self._is_nox(binary)
 
+    def _default_profile_dir(self) -> Path:
+        """
+        Путь к профилю qBittorrent по умолчанию для ОС.
+        Для nox используется только в `_prepare_config`, чтобы создать папку.
+        """
+        if settings.TRANSMISSION_CONFIG_DIR:
+            # переиспользуем — на случай, если кто-то укажет QBITTORRENT_CONFIG
+            return Path(settings.TRANSMISSION_CONFIG_DIR)
+        if _SYSTEM == "Windows":
+            base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or ""
+            return Path(base) / "qBittorrent"
+        if _SYSTEM == "Darwin":
+            return Path.home() / "Library" / "Application Support" / "qBittorrent"
+        # Linux и прочие
+        return Path.home() / ".config" / "qBittorrent"
+
+    def _prepare_config(self, binary: Path) -> Path:
+        """
+        Создаёт директорию профиля qBittorrent, если её нет,
+        и записывает минимальный конфиг для headless-режима.
+
+        qbittorrent-nox без существующего профиля завершается с exit code 1.
+        Добавляет WebUI\\LocalHostAuth=false, чтобы при локальном подключении
+        (127.0.0.1) аутентификация не требовалась.
+        """
+        profile_dir = self._default_profile_dir()
+        log.info(">>> %s: проверяем профиль %s", self.display_name, profile_dir)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        conf = profile_dir / "qBittorrent.conf"
+        if conf.exists():
+            content = conf.read_text()
+            if "WebUI\\LocalHostAuth=false" in content:
+                log.info(">>> %s: LocalHostAuth=false уже есть в %s",
+                         self.display_name, conf)
+            else:
+                log.info(">>> %s: добавляем WebUI\\LocalHostAuth=false в %s",
+                         self.display_name, conf)
+                with conf.open("a") as f:
+                    f.write("\nWebUI\\LocalHostAuth=false\n")
+        else:
+            log.info(">>> %s: создаём %s с LocalHostAuth=false",
+                     self.display_name, conf)
+            conf.write_text(
+                "[Preferences]\n"
+                "WebUI\\LocalHostAuth=false\n"
+                "WebUI\\Port=8080\n"
+            )
+
+        self._profile_dir = profile_dir
+        return profile_dir
+
     def _launch_args(self, binary: Path) -> list[str]:
         # Установленная версия qBittorrent 5.2.1 НЕ знает параметров командной
         # строки GUI: --webui-port валит процесс fast-fail'ом 0xC0000409,
@@ -502,8 +557,14 @@ class QBittorrentDaemon(TorrentClientDaemon):
         # все нужные настройки (WebUI-порт и т.п.) уже в её конфиге.
         args = [str(binary)]
         if self._is_nox(binary):
-            # headless-версия понимает --webui-port/--no-splash и т.п.
-            args += ["--webui-port", str(settings.QBITTORRENT_PORT)]
+            # headless-версия понимает --webui-port=<port>, --profile=<dir> и т.п.
+            # ВАЖНО: qBittorrent 4.x (Ubuntu 22.04) требует синтаксис =<value>,
+            #        --profile <dir> с пробелом НЕ работает ("unknown parameter").
+            profile = getattr(self, "_profile_dir", None) or self._default_profile_dir()
+            args += [
+                f"--profile={profile}",
+                f"--webui-port={settings.QBITTORRENT_PORT}",
+            ]
         return args
 
 

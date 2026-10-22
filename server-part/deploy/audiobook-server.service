@@ -1,0 +1,53 @@
+# ============================================================
+# Audiobook Home Server — systemd unit (Linux, headless)
+# ============================================================
+#
+# УСТАНОВКА:
+#   sudo cp deploy/audiobook-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now audiobook-server
+#
+# НАСТРОЙКА:
+#   - User/Group        — пользователь, от которого работает сервер.
+#   - WorkingDirectory  — каталог, где лежат main.py и .env.
+#   - ExecStart         — путь к python3 (или venv) + main.py.
+#
+# ВАЖНО: .env сервер читает сам из WorkingDirectory (pydantic-settings),
+# поэтому EnvironmentFile не нужен — он конфликтует с inline-комментариями
+# в .env (systemd не умеет inline-комментарии, а мы их используем).
+#
+# Торрент-клиент (qbittorrent-nox / transmission-daemon) сервер поднимает
+# сам через QBITTORRENT_AUTOSTART / TRANSMISSION_AUTOSTART, если он ещё
+# не запущен внешним systemd-юнитом.
+
+[Unit]
+Description=Audiobook Home Server
+Wants=network-online.target
+After=network.target network-online.target
+
+[Service]
+Type=simple
+User=vit
+Group=vit
+
+# каталог с main.py и .env
+WorkingDirectory=/home/vit/audiobook-home-server/server-part
+
+# Путь к Python (виртуальное окружение или системный).
+# По умолчанию — venv в корне проекта: /home/vit/audiobook-home-server/.venv/
+# Если venv не используется — замените на /usr/bin/python3
+ExecStart=/home/vit/audiobook-home-server/.venv/bin/python3 main.py
+
+Restart=always
+RestartSec=10
+
+# мягкое и жёсткое завершение (uvicorn ловит SIGTERM)
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# безопасность
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
