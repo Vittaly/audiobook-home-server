@@ -1,0 +1,3 @@
+# Автомонтирование USB-накопителей через systemd-шаблон.
+# Правило только "просит" systemd запустить юнит, монтирование делает systemd-mount.
+ACTION=="add", KERNEL=="sd[a-z]*", SUBSYSTEMS=="usb", ENV{ID_FS_USAGE}=="filesystem", ENV{SYSTEMD_WANTS}+="usb-mount@%k.service"

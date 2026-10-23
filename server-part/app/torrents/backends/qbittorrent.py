@@ -14,6 +14,22 @@
     проверяем наличие по хэшу, потом добавляем.
   - sequential_download передаём ОТДЕЛЬНО после приоритетов, а не
     в torrents_add — иначе qBittorrent может сбросить приоритеты.
+
+Аутентификация:
+  WebUI\\LocalHostAuth=false (если он остался в qBittorrent.conf от
+  старых версий скрипта) обходит аутентификацию ТОЛЬКО для веб-страниц,
+  но НЕ для REST API. При этом /api/v2/auth/login возвращает 200 Ok.
+  без cookie SID, и qbittorrent-api падает с LoginFailed(args=()), после
+  чего все запросы к API получают 403 Forbidden.
+
+  Поэтому QBittorrentDaemon в daemon.py теперь готовит профиль с
+  ВКЛЮЧЁННОЙ аутентификацией: WebUI\\LocalHostAuth=true и
+  WebUI\\Password_PBKDF2=<хэш пароля из settings>. Сервер выдаёт
+  настоящий cookie SID, и библиотека нормально работает.
+
+  Здесь мы делаем явный auth_log_in() при первом подключении, чтобы
+  сразу увидеть проблему с аутентификацией, а не ловить 403 разбросанно
+  по всем запросам.
 """
 
 import hashlib
@@ -23,7 +39,7 @@ import time
 from pathlib import Path
 
 import qbittorrentapi
-from qbittorrentapi.exceptions import Conflict409Error
+from qbittorrentapi.exceptions import Conflict409Error, LoginFailed
 
 from app.config import settings
 from app.torrents.backend import TorrentBackend, TorrentFileInfo, TorrentInfo
@@ -59,10 +75,41 @@ class QBittorrentBackend(TorrentBackend):
             self._client = qbittorrentapi.Client(
                 host=settings.QBITTORRENT_HOST,
                 port=settings.QBITTORRENT_PORT,
-                username=settings.QBITTORRENT_USER or None,
-                password=settings.QBITTORRENT_PASSWORD or None,
+                username=settings.QBITTORRENT_USER or "admin",
+                password=settings.QBITTORRENT_PASSWORD or "adminadmin",
             )
+            # Явный логин, чтобы сразу поймать проблемы с аутентификацией.
+            try:
+                self._client.auth_log_in()
+                log.info("qBittorrent: логин выполнен (cookie SID получен)")
+            except LoginFailed as e:
+                if not e.args:
+                    # Пустой args — классический симптом LocalHostAuth=false:
+                    # сервер ответил 200 Ok. но не выдал cookie SID.
+                    log.error(
+                        "qBittorrent: LoginFailed без cookie (args=()). "
+                        "Это значит, что в %s/qBittorrent.conf всё ещё "
+                        "стоит WebUI\\LocalHostAuth=false, который обходит "
+                        "аутентификацию только для WebUI, но не для API. "
+                        "Проверь, что QBittorrentDaemon перезаписал конфиг: "
+                        "там должно быть LocalHostAuth=true и "
+                        "Password_PBKDF2.",
+                        self._profile_hint(),
+                    )
+                else:
+                    log.error("qBittorrent: ошибка аутентификации: %r", e.args)
+                self._client = None
+                raise
+            except Exception:
+                log.exception("qBittorrent: ошибка при логине")
+                self._client = None
+                raise
         return self._client
+
+    @staticmethod
+    def _profile_hint() -> str:
+        """Подсказка с типовым путём к профилю (для лога)."""
+        return "~/.config/qBittorrent"
 
     def ping(self) -> bool:
         try:
@@ -71,7 +118,8 @@ class QBittorrentBackend(TorrentBackend):
             log.debug("qBittorrent версия: %s", v)
             return True
         except qbittorrentapi.APIError as e:
-            log.error("qBittorrent недоступен: %s", e)
+            log.error("qBittorrent недоступен: type=%s args=%r",
+                      type(e).__name__, e.args)
             self._client = None
             return False
         except Exception:

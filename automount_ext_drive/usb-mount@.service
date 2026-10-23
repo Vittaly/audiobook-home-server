@@ -1,0 +1,22 @@
+[Unit]
+Description=USB Automount for %i
+BindsTo=dev-%i.device
+After=dev-%i.device
+Before=umount.target
+Conflicts=umount.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# 1) Скрипт только вычисляет параметры и пишет /run/usb-mount/%i.env
+ExecStartPre=/usr/local/bin/usb-mount.sh resolve %i
+
+# 2) Монтирование выполняет systemd-mount, параметры берутся из env-файла
+ExecStart=/bin/sh -c 'set -a; . /run/usb-mount/%i.env; set +a; exec /usr/bin/systemd-mount --no-block --collect --options="$MOUNT_OPTS" "$DEV_PATH" "$MOUNT_POINT"'
+
+# 3) Демонтирование при извлечении (BindsTo выше гарантирует вызов)
+ExecStop=/bin/sh -c 'set -a; if [ -r /run/usb-mount/%i.env ]; then . /run/usb-mount/%i.env; fi; set +a; if [ -n "${MOUNT_POINT:-}" ]; then /usr/bin/systemd-umount "$MOUNT_POINT" || true; fi'
+
+# 4) Скрипт убирает env-файл и пустую папку
+ExecStopPost=/usr/local/bin/usb-mount.sh cleanup %i
