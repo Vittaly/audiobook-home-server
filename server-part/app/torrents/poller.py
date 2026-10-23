@@ -24,7 +24,7 @@ import logging
 
 from sqlalchemy import select
 
-from app.catalog.book_covers import try_search_book_cover
+from app.catalog.book_covers import search_book_cover_detached
 from app.catalog.covers import CoverService
 from app.catalog.ingest import ingest_release
 from app.config import settings
@@ -410,24 +410,12 @@ async def _run_book_cover_search(covers: CoverService, book_id: int) -> None:
     """
     Фоновая задача онлайн-поиска обложки книги.
 
-    Открывает собственную сессию (объекты из сессии поллера уже закрыты),
-    повторно проверяет актуальность и коммитит результат через session_scope.
+    Использует detached-поиск: БД транзакция открывается только на время
+    коротких чтения/записи, сеть (поиск + скачивание) проходит без
+    блокировки базы — иначе поллер/API падают с "database is locked".
     """
     try:
-        with session_scope() as db:
-            book = db.execute(
-                select(Book).where(Book.id == book_id)
-            ).scalar_one_or_none()
-            if book is None:
-                return
-
-            # повторная проверка: обложка могла появиться (файл докачался,
-            # другой проход поллера уже снял temp)
-            if book.cover_cache_path is not None or not book.cover_is_temp:
-                return
-
-            await try_search_book_cover(covers, book, book.release)
-            # session_scope закоммитит cover_* при выходе
+        await search_book_cover_detached(covers, book_id)
     except Exception:
         log.exception("book=%s: фоновая ошибка поиска обложки", book_id)
     finally:

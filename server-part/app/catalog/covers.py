@@ -84,6 +84,33 @@ class CoverService:
         )
         return ok
 
+    async def fetch_url_to_cache(self, url: str) -> dict | None:
+        """
+        Скачивает обложку по URL в кэш и возвращает метаданные
+        ({cache_path, sha256, mime}) без привязки к ORM-объекту.
+
+        Нужен, когда обложку скачивают вне открытой транзакции — например
+        sync_catalog, чтобы не держать write-лок SQLite во время сети
+        (иначе poller падает с "database is locked").
+        """
+        if not url:
+            return None
+
+        try:
+            r = await self._client.get(url)
+            r.raise_for_status()
+        except httpx.HTTPError as e:
+            log.warning("Обложка не скачана %s: %s", url, e)
+            return None
+
+        mime = (r.headers.get("content-type") or "").split(";")[0].strip()
+        return self._store_meta(
+            data=r.content,
+            mime=mime,
+            origin="tracker",
+            ext_hint=_ext_from_url(url),
+        )
+
     def cache_from_torrent(self, owner, image_path: Path) -> bool:
         """
         Копирует файл обложки из папки торрента в кэш.
@@ -139,14 +166,32 @@ class CoverService:
         Общая логика сохранения: проверка размера, дедупликация по sha256,
         запись в кэш, обновление полей owner.cover_*.
         """
+        meta = self._store_meta(
+            data=data, mime=mime, origin=origin, ext_hint=ext_hint)
+        if meta is None:
+            return False
+
+        owner.cover_origin = meta["origin"]
+        owner.cover_cache_path = meta["cache_path"]
+        owner.cover_sha256 = meta["sha256"]
+        owner.cover_mime = meta["mime"]
+        return True
+
+    def _store_meta(self, *, data: bytes, mime: str,
+                    origin: str, ext_hint: str = "") -> dict | None:
+        """
+        Сохраняет байты обложки в кэш и возвращает метаданные
+        ({origin, cache_path, sha256, mime}) для записи в БД отдельной
+        короткой транзакцией. Возвращает None при отказе.
+        """
         if not data:
             log.warning("Пустая обложка для %s", origin)
-            return False
+            return None
 
         if len(data) > settings.COVER_MAX_BYTES:
             log.warning("Обложка отклонена: %d байт > %d",
                         len(data), settings.COVER_MAX_BYTES)
-            return False
+            return None
 
         ext = _resolve_ext(mime, ext_hint) or "jpg"
         sha = layout.sha256_bytes(data)
@@ -159,11 +204,12 @@ class CoverService:
         else:
             log.debug("Обложка уже в кэше: %s", target)
 
-        owner.cover_origin = origin
-        owner.cover_cache_path = layout.cover_rel(sha, ext)
-        owner.cover_sha256 = sha
-        owner.cover_mime = mime or None
-        return True
+        return {
+            "origin": origin,
+            "cache_path": layout.cover_rel(sha, ext),
+            "sha256": sha,
+            "mime": mime or None,
+        }
 
 
 # ============================================================

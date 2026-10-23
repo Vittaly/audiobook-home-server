@@ -22,11 +22,98 @@
 import logging
 import re
 
+from sqlalchemy import select
+
 from app.catalog.covers import CoverService
 from app.config import settings
 from app.db.models import Book, Release
+from app.db.session import session_scope
 
 log = logging.getLogger(__name__)
+
+
+async def search_book_cover_detached(covers: CoverService, book_id: int) -> bool:
+    """
+    Онлайн-поиск обложки книги БЕЗ открытой БД-транзакции.
+
+    Порядок:
+      1. Короткая транзакция: читаем книгу, проверяем актуальность,
+         фиксируем title/author для поиска.
+      2. Сеть (поиск + скачивание) — база данных НЕ залочена.
+      3. Короткая транзакция: применяем результат (cover_*, cover_is_temp,
+         cover_retry_count).
+
+    Иначе во время сети (может занимать секунды) поллер не смог бы писать
+    в БД — "database is locked". Вызывается из фоновой задачи поллера.
+    """
+    from app.catalog.cover_search import search_cover
+
+    # ---------- 1. Короткая транзакция: читаем книгу ----------
+    with session_scope() as db:
+        book = db.execute(
+            select(Book).where(Book.id == book_id)
+        ).scalar_one_or_none()
+        if book is None:
+            return False
+
+        # повторная проверка: обложка могла появиться (файл докачался,
+        # другой проход поллера уже снял temp)
+        if book.cover_cache_path is not None or not book.cover_is_temp:
+            return False
+        if (book.cover_retry_count or 0) >= settings.COVER_RETRY_LIMIT:
+            return False
+        if not settings.COVER_SEARCH_ENABLED:
+            return False
+
+        release = book.release
+        if release is None:
+            return False
+
+        title = _clean_book_title(book.title or release.title)
+        author = _release_author(release)
+
+    # ---------- 2. Сеть: база данных НЕ залочена ----------
+    result = None
+    try:
+        log.info("book=%s: ищем обложку в интернете (%s — %s)",
+                 book_id, author, title)
+        result = await search_cover(title, author)
+    except Exception:
+        log.exception("book=%s: сбой поиска обложки", book_id)
+
+    meta = None
+    try:
+        if result is not None:
+            meta = await covers.fetch_url_to_cache(result.url)
+    except Exception:
+        log.exception("book=%s: сбой скачивания обложки %s",
+                      book_id, result.url if result else "?")
+        meta = None
+
+    # ---------- 3. Короткая транзакция: применяем результат ----------
+    with session_scope() as db:
+        book = db.get(Book, book_id)
+        if book is None:
+            return False
+
+        if meta is not None:
+            book.cover_origin = "online"
+            book.cover_cache_path = meta["cache_path"]
+            book.cover_sha256 = meta["sha256"]
+            book.cover_mime = meta["mime"]
+            book.cover_is_temp = False
+            book.cover_retry_count = 0
+            log.info("book=%s: обложка из %s (%s)",
+                     book_id, result.source, result.url)
+            return True
+
+        if result is not None:
+            log.warning("book=%s: не скачана обложка из %s (%s)",
+                        book_id, result.source, result.url)
+        else:
+            log.warning("book=%s: обложка не найдена в интернете", book_id)
+        book.cover_retry_count = (book.cover_retry_count or 0) + 1
+        return False
 
 
 async def try_search_book_cover(

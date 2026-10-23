@@ -125,22 +125,42 @@ async def _sync_catalog_inner(covers: CoverService) -> int:
 
 async def _process_item(item: dict, covers: CoverService,
                         sem: asyncio.Semaphore) -> int:
+    """
+    Обрабатывает одну раздачу.
+
+    ВАЖНО: сеть (детальная страница, скачивание обложки) выполняется БЕЗ
+    открытой транзакции БД. Иначе во время await держится write-лок SQLite,
+    и поллер/API падают с "database is locked".
+    """
+    # --- 1. короткая транзакция: UPSERT карточки, читаем состояние ---
     with _sync_session() as db:
         release = _upsert_release(db, item)
         if release is None:
             return 0
+        need_details = (
+            release.description is None and bool(item.get("source_url"))
+        )
+        need_cover = release.cover_cache_path is None
+        release_id = release.id
 
-        # --- детальная: описание, рубрики, чтец, обложка-URL ---
-        if release.description is None and item.get("source_url"):
-            raw = await _fetch_details(sem, item["source_url"])
-            if raw:
+    # --- 2. детальная страница (сеть): транзакция уже закрыта/закоммичена ---
+    raw = None
+    if need_details:
+        raw = await _fetch_details(sem, item["source_url"])
+
+    # --- 3. короткая транзакция: применение деталей ---
+    if raw:
+        with _sync_session() as db:
+            release = db.get(Release, release_id)
+            if release is not None:
                 _apply_release_update(db, release, raw)
 
-        # --- обложка карточки: трекер → интернет ---
-        if release.cover_cache_path is None:
-            await _ensure_cover(sem, release, covers)
+    # --- 4. обложка карточки: сеть без лочения БД, применение короткими
+    #       транзакциями ---
+    if need_cover:
+        await _ensure_cover_detached(sem, release_id, covers)
 
-        return 1
+    return 1
 
 
 # ============================================================
@@ -284,53 +304,108 @@ def _apply_release_update(db: Session, release: Release, update: dict) -> None:
 # ОБЛОЖКИ: ТРЕКЕР → ИНТЕРНЕТ
 # ============================================================
 
-async def _ensure_cover(sem: asyncio.Semaphore, release: Release,
-                        covers: CoverService) -> None:
+async def _ensure_cover_detached(sem: asyncio.Semaphore, release_id: int,
+                                 covers: CoverService) -> None:
     """
-    Пытается получить обложку карточки раздачи:
+    Пытается получить обложку карточки раздачи БЕЗ долгой транзакции БД.
+
+    Все сетевые операции (скачивание по cover_source_url, онлайн-поиск)
+    выполняются при закрытой транзакции; короткие чтения/записи состояния
+    обёрнуты в свои транзакции. Иначе во время сети держится write-лок
+    SQLite и поллер падает с "database is locked".
+
+    Логика:
       1. Скачать по cover_source_url (если он есть).
       2. Искать в интернете (cover_search) — если настройка включена.
       3. Оставить без обложки, cover_retry_count++.
     """
-    if release.cover_cache_path is not None:
-        return
+    from app.catalog.cover_search import search_cover
 
-    # --- 1. трекер ---
-    if release.cover_source_url:
+    # --- 0. короткая транзакция: читаем состояние карточки ---
+    with _sync_session() as db:
+        release = db.get(Release, release_id)
+        if release is None:
+            return
+        if release.cover_cache_path is not None:
+            return
+        source_url = release.cover_source_url
+        title = _clean_release_title(release.title)
+        author = _release_author(release)
+
+    # --- 1. трекер (сеть, транзакция закрыта) ---
+    if source_url:
+        meta = None
         async with sem:
             await asyncio.sleep(settings.SCRAPE_DELAY_SEC)
-            if await covers.fetch_from_url(release, release.cover_source_url):
-                return
-        release.cover_retry_count += 1
+            meta = await covers.fetch_url_to_cache(source_url)
+        if meta is not None:
+            _apply_cover_meta(release_id, meta, origin="tracker")
+            return
+        _bump_cover_retry(release_id)
 
-    # --- 2. интернет ---
+    # --- 2. интернет (сеть, транзакция закрыта) ---
     if not settings.COVER_SEARCH_ENABLED:
         return
 
-    from app.catalog.cover_search import search_cover
-
-    title = _clean_release_title(release.title)
-    author = _release_author(release)
-
+    result = None
     async with sem:
         await asyncio.sleep(settings.SCRAPE_DELAY_SEC)
         log.info("release=%s: ищем обложку в интернете (%s — %s)",
-                 release.id, author, title)
-        result = await search_cover(title, author)
+                 release_id, author, title)
+        try:
+            result = await search_cover(title, author)
+        except Exception:
+            log.exception("release=%s: сбой поиска обложки", release_id)
 
     if result is None:
-        log.warning("release=%s: обложка не найдена нигде", release.id)
+        log.warning("release=%s: обложка не найдена нигде", release_id)
+        _bump_cover_retry(release_id)
         return
 
-    # скачиваем найденную
+    # скачиваем найденную (сеть, транзакция закрыта)
+    meta = None
     async with sem:
         await asyncio.sleep(settings.SCRAPE_DELAY_SEC)
-        if await covers.fetch_from_url(release, result.url):
-            release.cover_origin = "online"
-            log.info("release=%s: обложка из %s", release.id, result.source)
-            return
+        try:
+            meta = await covers.fetch_url_to_cache(result.url)
+        except Exception:
+            log.exception("release=%s: сбой скачивания обложки %s",
+                          release_id, result.url)
+            meta = None
 
-    release.cover_retry_count += 1
+    if meta is not None:
+        _apply_cover_meta(release_id, meta, origin="online",
+                          source=result.source, url=result.url)
+        return
+
+    _bump_cover_retry(release_id)
+
+
+def _apply_cover_meta(release_id: int, meta: dict, *, origin: str,
+                      source: str | None = None,
+                      url: str | None = None) -> None:
+    """Короткая транзакция: записывает скачанную обложку в карточку."""
+    with _sync_session() as db:
+        release = db.get(Release, release_id)
+        if release is None:
+            return
+        release.cover_origin = origin
+        release.cover_cache_path = meta["cache_path"]
+        release.cover_sha256 = meta["sha256"]
+        release.cover_mime = meta["mime"]
+        release.cover_retry_count = 0
+        if origin == "online":
+            log.info("release=%s: обложка из %s (%s)",
+                     release_id, source, url)
+
+
+def _bump_cover_retry(release_id: int) -> None:
+    """Короткая транзакция: увеличивает счётчик ретраев карточки."""
+    with _sync_session() as db:
+        release = db.get(Release, release_id)
+        if release is None:
+            return
+        release.cover_retry_count = (release.cover_retry_count or 0) + 1
 
 
 def _clean_release_title(title: str) -> str:
@@ -402,12 +477,11 @@ def ingest_release(release_id: int, files: list[dict], torrent_name: str,
         ])
 
         created = 0
-        # удаляем «книгу-заглушку», если она осталась без глав
-        for old in list(release.books):
-            if not old.chapters:
-                db.delete(old)
-        db.flush()
-
+        # сначала сопоставляем книги с группами торрента и заполняем главы.
+        # ВАЖНО: удаление книг-заглушек ниже идёт ПОСЛЕ upsert — иначе для
+        # однокнижной раздачи заглушка (folder=None) удаляется, а затем
+        # переиспользуется группой (folder=None) → INSERT глав ссылается на
+        # уже удалённую книгу → FOREIGN KEY constraint failed.
         for i, group in enumerate(groups):
             book = _upsert_book_from_group(
                 db, release, i + 1, group, covers, is_multi=is_multi)
@@ -416,7 +490,16 @@ def ingest_release(release_id: int, files: list[dict], torrent_name: str,
             created += _append_chapters(book, release, group)
             detect_series_for_book(db, book, release, group)
 
-        for book in release.books:
+        # удаляем «книги-заглушки», оставшиеся без глав (не совпали
+        # ни с одной группой торрента) — snapshot живыми книгами
+        live_books = [b for b in release.books if b.chapters]
+        stale_books = [b for b in release.books if not b.chapters]
+        for old in stale_books:
+            db.delete(old)
+        db.flush()
+
+        # статусы считаем только по живым книгам
+        for book in live_books:
             book.recompute_status()
         release.recompute_status()
 

@@ -15,7 +15,13 @@ engine = create_engine(
     settings.db_url,
     echo=False,
     future=True,
-    connect_args={"check_same_thread": False},
+    # timeout — сколько секунд sqlite3 ждёт освобождения заблокированной БД
+    # (DRY-уровень busy_timeout). Без него SQLite падает сразу с
+    # "database is locked", даже если блокировку снимут через миллисекунду.
+    connect_args={
+        "check_same_thread": False,
+        "timeout": 30,
+    },
 )
 
 
@@ -25,6 +31,8 @@ def _set_sqlite_pragma(dbapi_conn, _):
     cur.execute("PRAGMA foreign_keys=ON")
     cur.execute("PRAGMA journal_mode=WAL")
     cur.execute("PRAGMA synchronous=NORMAL")
+    # ждать блокировку до 30 c вместо мгновенной ошибки "database is locked"
+    cur.execute("PRAGMA busy_timeout=30000")
     cur.close()
 
 
