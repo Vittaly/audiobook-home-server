@@ -44,7 +44,9 @@ _TEMP_HEADERS = {
 }
 
 
-@router.get("/books/{book_id}/cover")
+# GET и HEAD: клиенту плеера достаточно опросить заголовок X-Cover-Temp
+# (HEAD — без тела картинки), чтобы узнать, финальная ли уже обложка.
+@router.api_route("/books/{book_id}/cover", methods=["GET", "HEAD"])
 def get_book_cover(
     book_id: int,
     request: Request,
@@ -54,19 +56,28 @@ def get_book_cover(
     Отдаёт обложку книги (тома): из кэша или placeholder.
 
     Если у книги включена временная обложка (book.cover_is_temp) и своей
-    обложки ещё нет — отдаём обложку карточки-раздачи с заголовком
-    X-Cover-Temp: true и Cache-Control: no-cache, чтобы клиент
-    перезапрашивал картинку и вовремя получил свою обложку после
-    докачки файла или онлайн-поиска.
+    обложки ещё нет — отдаём обложку карточки-раздачи сразу, как только
+    сервер её знает, с заголовком X-Cover-Temp: true и Cache-Control:
+    no-cache. Клиент перезапрашивает картинку и вовремя получит свою обложку
+    после докачки файла или онлайн-поиска.
+
+    Обложка раздачи отдаётся без обязательного условия, что она уже в кэше:
+    если она есть — вернём её; если ещё нет — вернём placeholder, но всё
+    равно с X-Cover-Temp: true, чтобы клиент не принял заглушку за финальную
+    обложку и продолжил опрос.
+
+    Метод HEAD возвращает те же заголовки без тела — для дешёвого опроса
+    клиентом (плеер проверяет X-Cover-Temp, пока не получит финальную).
     """
     book = db.get(Book, book_id)
     if book is None:
         raise HTTPException(404, "book not found")
 
-    # временная обложка: показываем обложку раздачи, помечаем заголовком
+    # Временная обложка: своя ещё не получена — отдаём обложку раздачи
+    # (или placeholder с тем же признаком) с X-Cover-Temp: true.
     if book.cover_is_temp and not book.cover_cache_path:
         release = book.release
-        if release is not None and release.cover_cache_path:
+        if release is not None:
             return _serve_temp_release_cover(release, request)
 
     return _serve_cover("book", book_id, book, request)
@@ -101,7 +112,7 @@ def _serve_temp_release_cover(release: Release, request: Request) -> Response:
         )
 
     # обложки раздачи нет — заглушка, но с признаком временного состояния
-    return _placeholder_response(headers=_TEMP_HEADERS)
+    return _placeholder_response(headers=_TEMP_HEADERS, method=request.method)
 
 
 @router.get("/releases/{release_id}/cover")
@@ -153,18 +164,27 @@ def _serve_cover(kind: str, owner_id: int, owner, request: Request) -> Response:
 
     # --- placeholder ---
     log.debug("%s=%s: cover placeholder", kind, owner_id)
-    return _placeholder_response()
+    return _placeholder_response(method=request.method)
 
 
 # ============================================================
 # PLACEHOLDER
 # ============================================================
 
-def _placeholder_response(headers: dict | None = None) -> Response:
-    """Возвращает картинку-заглушку или минимальный SVG, если её нет."""
+def _placeholder_response(headers: dict | None = None,
+                          method: str = "GET") -> Response:
+    """
+    Возвращает картинку-заглушку или минимальный SVG, если её нет.
+
+    Для метода HEAD тело не отдаём (только заголовки) — нужно, чтобы
+    дешёвый опрос обложки клиентом был корректным. FileResponse сам
+    учитывает HEAD, а inline-Response — нет, поэтому обрабатываем явно.
+    """
     base = {"Cache-Control": "public, max-age=86400"}
     if headers:
         base.update(headers)
+
+    is_head = (method or "GET").upper() == "HEAD"
 
     if _PLACEHOLDER.exists():
         return FileResponse(
@@ -177,7 +197,7 @@ def _placeholder_response(headers: dict | None = None) -> Response:
     # это гарантирует, что клиент всегда получит 200 с картинкой
     svg = _SVG_PLACEHOLDER.encode("utf-8")            # явное кодирование
     return Response(
-        content=svg,
+        content=None if is_head else svg,
         media_type="image/svg+xml",
         headers=base,
     )

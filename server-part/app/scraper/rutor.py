@@ -9,7 +9,7 @@
 
 import logging
 import re
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import httpx
 from selectolax.lexbor import LexborHTMLParser
@@ -356,7 +356,11 @@ def _parse_row(row, base: str) -> dict | None:
         return None
 
     title_raw = _text(title_a)
-    source_url = urljoin(base, title_a.attributes["href"])
+    # href раздачи может содержать кириллицу/«ёлочки». Кодируем путь,
+    # чтобы source_url был ASCII-совместимым (иначе он падал в Referer
+    # при запросе .torrent-файла — см. manager.fetch_torrent_bytes).
+    href = title_a.attributes.get("href", "")
+    source_url = urljoin(base, quote(href, safe="/:@!$&'()*+,;=~-._"))
 
     size_bytes = None
     for cell in cells:

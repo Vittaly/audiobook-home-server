@@ -30,6 +30,47 @@ fun formatDurationMs(ms: Long): String {
 fun formatSeconds(sec: Int?): String =
     if (sec == null) "—" else formatDurationMs(sec * 1000L)
 
+/**
+ * Дата релиза с трекера (ISO-8601: 'YYYY-MM-DD' или 'YYYY-MM-DDTHH:MM:SS±...')
+ * → 'dd.MM.yyyy'. Если строка пустая или неожиданного формата — null.
+ */
+fun formatReleaseDate(iso: String?): String? {
+    val datePart = iso?.substringBefore('T')?.substringBefore(' ')?.trim()
+    if (datePart.isNullOrEmpty()) return null
+    val parts = datePart.split('-')
+    if (parts.size != 3 || parts[0].length != 4) return null
+    val (year, month, day) = parts
+    return "$day.$month.$year"
+}
+
+/**
+ * Разобранное описание раздачи: [intro] — основной текст, [contents] — пункты
+ * перечня из встроенного блока «Содержание».
+ */
+data class ParsedDescription(
+    val intro: String,
+    val contents: List<String>,
+)
+
+/**
+ * Разбирает `release.description`. Сервер сохраняет «Описание» трекера целиком,
+ * включая встроенный блок вида `... Содержание: 1. Первый\n2. Второй ...`.
+ * Выделяем этот блок: [ParsedDescription.intro] — текст до метки, а
+ * [ParsedDescription.contents] — отдельные пункты (каждый с новой строки).
+ */
+fun parseReleaseDescription(description: String?): ParsedDescription? {
+    if (description.isNullOrBlank()) return null
+    val marker = Regex("(?i)содержание\\s*:?")
+    val m = marker.find(description)
+        ?: return ParsedDescription(description.trim(), emptyList())
+    val intro = description.substring(0, m.range.first).trim()
+    val contents = description.substring(m.range.last + 1)
+        .split('\n')
+        .map { it.trim().trimStart('-', '·', '•').trim() }
+        .filter { it.isNotEmpty() }
+    return ParsedDescription(intro, contents)
+}
+
 fun formatBytes(bytes: Long): String {
     val kb = bytes / 1024.0
     return when {

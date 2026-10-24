@@ -76,7 +76,14 @@ class Release(Base):
     cover_sha256:      Mapped[str | None] = mapped_column(String(64), index=True)
     cover_retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
+    # Время индексации карточки на сервере (момент записи в БД).
     added_at:      Mapped[datetime] = mapped_column(
+        DateTime, default=func.now(), nullable=False, index=True)
+    # Дата создания раздачи на трекере (парсится со страницы поиска).
+    # Отдельно от added_at: added_at — когда мы проиндексировали, released_at —
+    # когда раздача появилась на трекере. Легаси-записи (без даты трекера)
+    # заполняются значением added_at при миграции схемы в init_db.
+    released_at:   Mapped[datetime] = mapped_column(
         DateTime, default=func.now(), nullable=False, index=True)
     downloaded_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_accessed: Mapped[datetime | None] = mapped_column(DateTime, index=True)

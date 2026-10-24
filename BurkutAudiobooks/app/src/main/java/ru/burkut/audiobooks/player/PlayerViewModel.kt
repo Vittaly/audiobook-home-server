@@ -5,6 +5,7 @@ package ru.burkut.audiobooks.player
 import android.app.Application
 import android.content.ComponentName
 import android.net.Uri
+import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -12,11 +13,12 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.datasource.HttpDataSource
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,26 +28,31 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import ru.burkut.audiobooks.App
-import ru.burkut.audiobooks.data.api.BookDetailOut
-import ru.burkut.audiobooks.data.api.BookStatus
-import ru.burkut.audiobooks.data.api.ChapterOut
+import ru.burkut.audiobooks.data.db.BookEntity
+import ru.burkut.audiobooks.data.db.ChapterEntity
+import java.io.File
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 data class PlaybackUiState(
-    val isConnected: Boolean = false,
+    val isServerOnline: Boolean = false,
     val hasMedia: Boolean = false,
     val isPlaying: Boolean = false,
     val isBuffering: Boolean = false,
-    val title: String? = null,
+    val title: String? = null,          // книга
     val artist: String? = null,
     val artUri: String? = null,
-    val positionMs: Long = 0L,
-    val durationMs: Long = 0L,
+    val positionMs: Long = 0L,          // позиция в текущей главе
+    val durationMs: Long = 0L,          // длительность текущей главы
     val bufferedMs: Long = 0L,
-    val mediaId: String? = null,
+    val bookPositionMs: Long = 0L,      // позиция в книге (верхний бар)
+    val bookDurationMs: Long = 0L,      // общая длительность книги (верхний бар)
+    val fileName: String? = null,       // имя текущего файла
+    val mediaId: String? = null,        // "bookId:ordinal"
     val preparing: Boolean = false,
+    val offlineQueued: Boolean = false, // книга в очереди (нет доступа к серверу)
 )
 
 class PlayerViewModel(application: Application) : ViewModel() {
@@ -54,6 +61,9 @@ class PlayerViewModel(application: Application) : ViewModel() {
     private val app = application as App
     private val repository = app.repository
     private val settings = app.settings
+    private val storage = app.storage
+    private val coverStore = app.coverStore
+    private val downloadQueue = app.downloadQueue
 
     private val _state = MutableStateFlow(PlaybackUiState())
     val state: StateFlow<PlaybackUiState> = _state.asStateFlow()
@@ -61,11 +71,34 @@ class PlayerViewModel(application: Application) : ViewModel() {
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
-    private var retryCount = 0
+    private val _requestNextVolume = MutableStateFlow<BookEntity?>(null)
+    val requestNextVolume: StateFlow<BookEntity?> = _requestNextVolume.asStateFlow()
 
     private var prepareJob: Job? = null
     private var retryJob: Job? = null
-    private var progressSaverJob: Job? = null
+
+    /** Схлопывание частых пересчётов прогресса книги в один фоновый прогон. */
+    private var bookProgressJob: Job? = null
+    private var bookProgressPending = false
+
+    /** Книга, открытая в полноэкранном плеере (для promote/demote очереди). */
+    private var playerScreenBookId: Int? = null
+
+    /**
+     * Текущий URL обложки для UI. Хранится отдельно от mediaMetadata, потому
+     * что финальная обложка появляется уже после старта воспроизведения:
+     * [coverPollJob] опрашивает сервер и обновляет URL (с cache-busting nonce),
+     * а навигация по медиа не пересоздаётся — поэтому snapshot() берёт artUri
+     * именно отсюда, а не из mediaMetadata.
+     */
+    private var currentCoverUrl: String? = null
+
+    /**
+     * Опрос готовности финальной обложки (HEAD /books/{id}/cover). Пока сервер
+     * отдаёт признак X-Cover-Temp, обновляем URL с nonce, чтобы Coil перечитал
+     * картинку; как только признак снят — фиксируем финал и выходим.
+     */
+    private var coverPollJob: Job? = null
 
     private val controllerFuture: com.google.common.util.concurrent.ListenableFuture<MediaController> =
         MediaController.Builder(
@@ -89,6 +122,13 @@ class PlayerViewModel(application: Application) : ViewModel() {
             executor,
         )
         viewModelScope.launch {
+            // Отслеживаем доступность сервера для индикатора и очереди.
+            app.serverMonitor.availability.collect { avail ->
+                val online = avail == ru.burkut.audiobooks.data.ServerAvailability.Online
+                _state.update { it.copy(isServerOnline = online) }
+            }
+        }
+        viewModelScope.launch {
             while (true) {
                 delay(400)
                 snapshot()
@@ -97,13 +137,8 @@ class PlayerViewModel(application: Application) : ViewModel() {
         startProgressSaver()
     }
 
-    // ============================================================
-    // Сохранение позиции
-    // ============================================================
-
     private fun startProgressSaver() {
-        progressSaverJob?.cancel()
-        progressSaverJob = viewModelScope.launch {
+        viewModelScope.launch {
             while (isActive) {
                 delay(SAVE_PROGRESS_INTERVAL_MS)
                 saveCurrentProgress()
@@ -115,12 +150,12 @@ class PlayerViewModel(application: Application) : ViewModel() {
         val controller = controllerOrNull ?: return
         val mediaId = controller.currentMediaItem?.mediaId ?: return
         val parsed = parseMediaId(mediaId) ?: return
-        val (bookId, chapterId) = parsed
+        val (bookId, chapterOrdinal) = parsed
         val position = controller.currentPosition
-        if (position <= 0) return
-
-        viewModelScope.launch {
-            runCatching { repository.saveProgress(bookId, chapterId, position) }
+        if (position > 0) {
+            viewModelScope.launch {
+                runCatching { repository.saveProgress(bookId, chapterOrdinal, position) }
+            }
         }
     }
 
@@ -129,13 +164,9 @@ class PlayerViewModel(application: Application) : ViewModel() {
         val parts = mediaId.split(":")
         if (parts.size != 2) return null
         val bookId = parts[0].toIntOrNull() ?: return null
-        val chapterId = parts[1].toIntOrNull() ?: return null
-        return bookId to chapterId
+        val chapterOrdinal = parts[1].toIntOrNull() ?: return null
+        return bookId to chapterOrdinal
     }
-
-    // ============================================================
-    // Listener
-    // ============================================================
 
     private val controllerListener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
@@ -148,35 +179,24 @@ class PlayerViewModel(application: Application) : ViewModel() {
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             saveCurrentProgress()
+            if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
+                // Завершилась последняя глава текущей книги — предложим следующий том.
+                maybeRequestNextVolume()
+            }
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
             if (playbackState == Player.STATE_ENDED) {
                 saveCurrentProgress()
+                val mediaId = controllerOrNull?.currentMediaItem?.mediaId
+                if (parseMediaId(mediaId)?.first != null) maybeRequestNextVolume()
             }
         }
 
         override fun onPlayerError(error: PlaybackException) {
             if (_state.value.preparing) return
-
-            val code = (error.cause as? HttpDataSource.InvalidResponseCodeException)?.responseCode
-            val transient = code == 409 || code == 502 || code == 503
-
-            if (transient && retryCount < MAX_RETRIES) {
-                retryCount++
-                _state.update { it.copy(preparing = true) }
-                retryJob?.cancel()
-                retryJob = viewModelScope.launch {
-                    delay(RETRY_DELAY_MS)
-                    controllerOrNull?.let { c ->
-                        c.prepare()
-                        c.play()
-                    }
-                }
-            } else {
-                _state.update { it.copy(preparing = false) }
-                _error.value = error.message ?: "Ошибка воспроизведения"
-            }
+            _state.update { it.copy(preparing = false) }
+            _error.value = "Ошибка воспроизведения: ${error.message}"
         }
     }
 
@@ -200,25 +220,133 @@ class PlayerViewModel(application: Application) : ViewModel() {
         _state.update { prev ->
             if (prev.preparing) {
                 prev.copy(
-                    isConnected = true,
                     isPlaying = controller.playWhenReady && controller.isPlaying,
                     isBuffering = controller.playbackState == Player.STATE_BUFFERING,
+                    // Пока готовится новая книга, прежний controller уже очищен
+                    // (clearMediaItems), поэтому artUri не должен «протекать» из
+                    // метаданных предыдущего трека — источник только currentCoverUrl.
+                    artUri = currentCoverUrl ?: prev.artUri,
                 )
             } else {
-                PlaybackUiState(
-                    isConnected = true,
+                prev.copy(
                     hasMedia = controller.mediaItemCount > 0,
                     isPlaying = controller.playWhenReady && controller.isPlaying,
                     isBuffering = controller.playbackState == Player.STATE_BUFFERING,
-                    title = item?.mediaMetadata?.title?.toString(),
-                    artist = item?.mediaMetadata?.artist?.toString(),
-                    artUri = item?.mediaMetadata?.artworkUri?.toString(),
+                    title = item?.mediaMetadata?.artist?.toString(),      // книга
+                    artist = item?.mediaMetadata?.title?.toString(),      // глава
+                    // Обложку держим отдельно: финальная версия приходит уже
+                    // после старта воспроизведения (опрос coverPollJob), а
+                    // mediaMetadata.artworkUri остаётся исходным. Если опрошенного
+                    // URL ещё нет — падаем на обложку из метаданных.
+                    artUri = currentCoverUrl ?: item?.mediaMetadata?.artworkUri?.toString(),
                     positionMs = controller.currentPosition,
-                    durationMs = if (duration > 0) duration else 0L,
+                    // ExoPlayer периодически отдаёт C.TIME_UNSET (<= 0) при
+                    // буферизации/переходе. Не сбрасываем длительность в 0 —
+                    // иначе слайдер главы прыгает (мерцание). Держим последнее
+                    // известное значение, пока играет тот же медиаэлемент.
+                    durationMs = if (duration > 0) {
+                        duration
+                    } else if (item?.mediaId == prev.mediaId) {
+                        prev.durationMs
+                    } else {
+                        0L
+                    },
                     bufferedMs = controller.bufferedPosition,
                     mediaId = item?.mediaId,
+                    // Имя файла === номер главы на диске: {ordinal}.mp3
+                    fileName = parseMediaId(item?.mediaId)?.let { (_, ordinal) -> "$ordinal.mp3" },
                     preparing = false,
                 )
+            }
+        }
+        requestBookProgressUpdate()
+    }
+
+    /** Схлопывает частые вызовы пересчёта прогресса книги в один прогон. */
+    private fun requestBookProgressUpdate() {
+        if (bookProgressJob?.isActive == true) {
+            bookProgressPending = true
+            return
+        }
+        bookProgressJob = viewModelScope.launch {
+            do {
+                bookProgressPending = false
+                updateBookProgress()
+            } while (bookProgressPending && isActive)
+        }
+    }
+
+    /** Пересчёт позиции/длительности всей книги (верхний бар). */
+    private suspend fun updateBookProgress() {
+        val controller = controllerOrNull
+        val mediaId = controller?.currentMediaItem?.mediaId ?: run {
+            _state.update { it.copy(bookPositionMs = 0, bookDurationMs = 0) }
+            return
+        }
+        val parsed = parseMediaId(mediaId) ?: return
+        val (bookId, currentOrdinal) = parsed
+        val chapters = repository.getChapters(bookId)
+        if (chapters.isEmpty()) return
+
+        // Сервер не знает длительностей глав (durationSec == null для глав из
+        // торрента) — приоритет у длительностей, измеренных клиентом по
+        // аудиофайлу (localDurationSec). Уже скачанные файлы измеряем один раз.
+        backfillLocalDurations(chapters)
+
+        // Пока читали БД, могла произойти смена главы — устаревшие данные не пишем.
+        if (controllerOrNull?.currentMediaItem?.mediaId != mediaId) return
+
+        val durationOf = { ch: ChapterEntity -> (ch.localDurationSec ?: ch.durationSec ?: 0).toLong() }
+        val totalMs = chapters.sumOf(durationOf) * 1000L
+
+        // Позиция книги: сумма длительностей пройденных глав + позиция в текущей.
+        val currentPos = controller?.currentPosition ?: 0L
+        var bookPos = 0L
+        for (ch in chapters) {
+            if (ch.ordinal < currentOrdinal) bookPos += durationOf(ch) * 1000L
+        }
+        bookPos += currentPos
+
+        // Длительность ИГРАЮЩЕЙ главы: пока она ещё растёт (.part) и ExoPlayer
+        // отдаёт C.TIME_UNSET (0) — показываем измеренную localDurationSec. Уже
+        // известную длительность нулём не перебиваем, чтобы слайдер не мерцал.
+        val controllerDuration = controller?.duration ?: 0L
+        val currentCh = chapters.firstOrNull { it.ordinal == currentOrdinal }
+        val chapterMs = (currentCh?.localDurationSec ?: currentCh?.durationSec ?: 0) * 1000L
+        val effectiveDuration = when {
+            controllerDuration > 0 -> controllerDuration
+            chapterMs > 0 -> chapterMs
+            else -> 0L
+        }
+        _state.update {
+            it.copy(
+                bookPositionMs = bookPos,
+                bookDurationMs = totalMs,
+                durationMs = if (effectiveDuration > 0) effectiveDuration else it.durationMs,
+            )
+        }
+    }
+
+    /**
+     * Измеряет реальные длительности уже скачанных глав, у которых ещё нет
+     * локальной длительности (localDurationSec == null), и сохраняет в кэш.
+     * Вызывается при каждом обновлении прогресса, но каждая глава измеряется
+     * только один раз (после сохранения localDurationSec <> null повторно не
+     * читается).
+     */
+    private suspend fun backfillLocalDurations(chapters: List<ChapterEntity>) {
+        for (ch in chapters) {
+            if (ch.localDurationSec != null) continue
+            if (!storage.isChapterReady(ch)) continue
+            // Измерение аудиофайла — синхронная работа с метаданными, выполняем
+            // вне главного потока (вызов может прийти из UI-контекста).
+            val sec = withContext(Dispatchers.IO) {
+                ChapterDurationProbe.measureDurationSec(
+                    storage.chapterFile(ch.bookId, ch.ordinal),
+                )
+            }
+            if (sec != null && sec > 0) {
+                repository.setChapterLocalDuration(ch.id, sec)
             }
         }
     }
@@ -229,22 +357,183 @@ class PlayerViewModel(application: Application) : ViewModel() {
 
     fun playBook(bookId: Int) = startPrepare(bookId, null)
 
-    fun playChapter(bookId: Int, chapterId: Int) = startPrepare(bookId, chapterId)
+    fun playChapter(bookId: Int, chapterOrdinal: Int) = startPrepare(bookId, chapterOrdinal)
 
-    private fun startPrepare(bookId: Int, chapterId: Int?) {
-        // Перед сменой книги сохраняем позицию того, что играло.
+    /**
+     * Проигрывание ВСЕЙ раздачи с самого начала.
+     *
+     * Клиент не знает книг заранее: сервер не создаёт книгу-заглушку, книги
+     * появляются только после старта загрузки. Стартуем торрент на уровне
+     * раздачи (POST /releases/{id}/download), ждём появления книг, берём
+     * ПЕРВУЮ по порядку (минимальный ordinal), ждём её глав и запускаем
+     * плеер с первой главы — с самого начала раздачи.
+     */
+    fun playRelease(releaseId: Int) {
+        Log.d(TAG, "playRelease releaseId=$releaseId")
         saveCurrentProgress()
 
         prepareJob?.cancel()
         retryJob?.cancel()
-        retryJob = null
+        // Новая раздача: сбрасываем обложку прежней книги и её опрос.
+        resetCurrentCover()
 
         prepareJob = viewModelScope.launch {
             try {
-                prepareAndPlay(bookId, chapterId)
+                startReleaseDownloadAndWait(releaseId)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                Log.e(TAG, "playRelease error releaseId=$releaseId", e)
+                _state.update { s -> s.copy(preparing = false) }
+                _error.value = e.message ?: "Ошибка воспроизведения"
+            }
+        }
+    }
+
+    /**
+     * Запускает серверную загрузку ВСЕЙ раздачи (POST /releases/{id}/download —
+     * книга не нужна, сервер не создаёт книгу-заглушку) и ждёт появления ПЕРВОЙ
+     * книги по порядку (минимальный ordinal), затем её глав, и начинает
+     * воспроизведение с самого начала — с первой главы первой книги.
+     */
+    private suspend fun startReleaseDownloadAndWait(releaseId: Int) {
+        Log.d(TAG, "startReleaseDownloadAndWait releaseId=$releaseId")
+        saveCurrentProgress()
+
+        // Книги раздачи уже есть локально (в том числе с готовыми главами) —
+        // играем сразу и НЕ трогаем сеть. Это убирает надпись «Подготовка
+        // раздачи на сервере» и сетевой таймаут для уже скачанной раздачи.
+        val cachedFirst = repository.getBooksByRelease(releaseId).minByOrNull { it.ordinal }
+        if (cachedFirst != null) {
+            val cachedChapters = repository.getChapters(cachedFirst.id)
+            if (cachedChapters.isNotEmpty()) {
+                Log.d(TAG, "startReleaseDownloadAndWait cached book=${cachedFirst.id} chapters=${cachedChapters.size}")
+                playLocal(cachedFirst.id, cachedChapters, null)
+                return
+            }
+        }
+
+        // Локальных книг нет: без сервера раздачу не подготовить — в очередь.
+        val online = app.serverMonitor.availability.value ==
+            ru.burkut.audiobooks.data.ServerAvailability.Online
+        if (!online) {
+            Log.d(TAG, "startReleaseDownloadAndWait offline, no cached books -> queue")
+            _state.update {
+                it.copy(preparing = false, offlineQueued = true, title = "Раздача в очереди")
+            }
+            repository.setReleaseQueued(releaseId, true)
+            return
+        }
+
+        _state.update {
+            it.copy(
+                preparing = true,
+                title = "Подготовка раздачи на сервере…",
+                artist = null,
+                hasMedia = false,
+                offlineQueued = false,
+            )
+        }
+
+        // Книг ещё нет — сразу показываем обложку карточки-раздачи, чтобы
+        // окно плеера не оставалось пустым во время подготовки.
+        applyReleaseCover(releaseId)
+
+        // Сообщаем серверу о начале загрузки всей раздачи (POST /releases/{id}/download).
+        val started = runCatching {
+            Log.d(TAG, "startReleaseDownload POST /releases/$releaseId/download")
+            repository.startReleaseDownload(releaseId)
+        }
+        Log.d(TAG, "startReleaseDownload result failure=${started.isFailure} err=${started.exceptionOrNull()?.message}")
+        if (started.isFailure && repository.getBooksByRelease(releaseId).isEmpty()) {
+            // На случай «already_done» пробуем ещё раз подтянуть карточку раздачи.
+            runCatching { repository.getReleaseDetail(releaseId, online = true) }
+            if (repository.getBooksByRelease(releaseId).isEmpty()) {
+                _state.update { it.copy(preparing = false) }
+                _error.value = "Не удалось начать загрузку на сервере: " +
+                    (started.exceptionOrNull()?.message ?: "неизвестная ошибка")
+                return
+            }
+        }
+
+        // Ждём появления ПЕРВОЙ книги по порядку (минимальный ordinal) и её глав.
+        // Поллер на сервере создаёт книги только после фактического ингеста
+        // файлов торрента, поэтому книга-«заглушка» тут не появится — ждём
+        // настоящую книгу с её главами.
+        val deadline = System.currentTimeMillis() + SERVER_PREPARE_TIMEOUT_MS
+        while (System.currentTimeMillis() < deadline && currentCoroutineContext().isActive) {
+            runCatching { repository.getReleaseDetail(releaseId, online = true) }
+            val firstBook = repository.getBooksByRelease(releaseId).minByOrNull { it.ordinal }
+            if (firstBook != null) {
+                val chapters = repository.getChapters(firstBook.id)
+                Log.d(TAG, "startReleaseDownload poll firstBook=${firstBook.id} ordinal=${firstBook.ordinal} chapters=${chapters.size} elapsed=${System.currentTimeMillis() - (deadline - SERVER_PREPARE_TIMEOUT_MS)}ms")
+                if (chapters.isNotEmpty()) {
+                    // Играем с самого начала раздачи — с первой главы первой книги.
+                    playLocal(firstBook.id, chapters, null)
+                    return
+                }
+                // Книга уже появилась, глав ещё нет — показываем её обложку.
+                applyBookCover(firstBook.id)
+            }
+            delay(SERVER_PREPARE_POLL_MS)
+        }
+        Log.d(TAG, "startReleaseDownloadAndWait timeout: books/chapters not appeared")
+
+        // Не дождались — серверная загрузка уже запущена, поллер продолжит
+        // свою работу; помечаем раздачу для фоновой докачки.
+        _state.update {
+            it.copy(
+                preparing = false,
+                offlineQueued = true,
+                title = "Раздача готовится на сервере",
+            )
+        }
+        repository.setReleaseQueued(releaseId, true)
+    }
+
+    /** Полноэкранный плеер открыт: поднимаем книгу в быструю очередь. */
+    fun onPlayerScreenOpened() {
+        val bookId = playerScreenBookId ?: parseMediaId(_state.value.mediaId)?.first
+        if (bookId != null) {
+            playerScreenBookId = bookId
+            downloadQueue.promoteBook(bookId)
+        }
+    }
+
+    /** Полноэкранный плеер закрыт: недокачанные главы книги — в медленную очередь. */
+    fun onPlayerScreenClosed() {
+        val bookId = playerScreenBookId
+        playerScreenBookId = null
+        // Плеер закрыт — зачем продолжать опрашивать обложку в фоне.
+        coverPollJob?.cancel()
+        if (bookId != null) {
+            downloadQueue.demoteBook(bookId)
+        }
+    }
+
+    fun dismissNextVolume() = _requestNextVolume.update { null }
+
+    fun startNextVolume(nextBookId: Int) {
+        _requestNextVolume.update { null }
+        playBook(nextBookId)
+    }
+
+    private fun startPrepare(bookId: Int, chapterOrdinal: Int?) {
+        Log.d(TAG, "startPrepare bookId=$bookId chapterOrdinal=$chapterOrdinal")
+        saveCurrentProgress()
+
+        prepareJob?.cancel()
+        retryJob?.cancel()
+        // Новая книга: сбрасываем обложку прежней книги и её опрос.
+        resetCurrentCover()
+
+        prepareJob = viewModelScope.launch {
+            try {
+                prepareAndPlay(bookId, chapterOrdinal)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "startPrepare error bookId=$bookId", e)
                 _state.update { s -> s.copy(preparing = false) }
                 _error.value = e.message ?: "Ошибка воспроизведения"
             }
@@ -274,21 +563,19 @@ class PlayerViewModel(application: Application) : ViewModel() {
     fun dismissError() = _error.update { null }
 
     override fun onCleared() {
-        // viewModelScope уже отменён, сохраняем синхронно (это короткая
-        // запись одной строки в Room).
         val controller = controllerOrNull
         val parsed = parseMediaId(controller?.currentMediaItem?.mediaId)
         val position = controller?.currentPosition ?: 0L
         if (parsed != null && position > 0) {
-            val (bookId, chapterId) = parsed
+            val (bookId, chapterOrdinal) = parsed
             runBlocking {
-                runCatching { repository.saveProgress(bookId, chapterId, position) }
+                runCatching { repository.saveProgress(bookId, chapterOrdinal, position) }
             }
         }
 
         prepareJob?.cancel()
         retryJob?.cancel()
-        progressSaverJob?.cancel()
+        coverPollJob?.cancel()
 
         if (controllerFuture.isDone) {
             runCatching { controllerFuture.get().release() }
@@ -302,101 +589,236 @@ class PlayerViewModel(application: Application) : ViewModel() {
     // Ядро
     // ============================================================
 
-    private suspend fun prepareAndPlay(bookId: Int, chapterId: Int?) {
+    private suspend fun prepareAndPlay(bookId: Int, chapterOrdinal: Int?) {
+        Log.d(TAG, "prepareAndPlay bookId=$bookId chapterOrdinal=$chapterOrdinal")
         controllerOrNull?.let { c ->
             c.stop()
             c.clearMediaItems()
         }
 
+        _state.update { PlaybackUiState(isServerOnline = it.isServerOnline, preparing = true) }
+
+        // Главы уже в кэше — играем сразу.
+        val chapters = repository.getChapters(bookId)
+        Log.d(TAG, "prepareAndPlay cached chapters=${chapters.size}")
+        if (chapters.isNotEmpty()) {
+            return playLocal(bookId, chapters, chapterOrdinal)
+        }
+
+        // Глав нет локально.
+        val online = app.serverMonitor.availability.value ==
+            ru.burkut.audiobooks.data.ServerAvailability.Online
+        Log.d(TAG, "prepareAndPlay serverOnline=$online")
+        if (online) {
+            // Свежая карточка с сервера — после синка должны появиться главы.
+            runCatching { repository.getReleaseDetailForBook(bookId, online) }
+            val chapters2 = repository.getChapters(bookId)
+            Log.d(TAG, "prepareAndPlay chapters after refresh=${chapters2.size}")
+            if (chapters2.isNotEmpty()) {
+                return playLocal(bookId, chapters2, chapterOrdinal)
+            }
+            // Сервер доступен, но глав всё ещё нет: книга в статусе
+            // «announced» (торрент не качался). Запускаем серверную загрузку
+            // и ждём, пока поллер создаст главы.
+            startServerDownloadAndWait(bookId, chapterOrdinal)
+            return
+        }
+
+        // Нет глав локально и нет сервера — ставим раздачу в очередь.
+        queueReleaseForBook(bookId)
+    }
+
+    /**
+     * Книга на сервере в статусе announced — главы ещё не созданы.
+     * Запускаем серверную загрузку торрента и опрашиваем каталог,
+     * пока не появятся главы, затем начинаем воспроизведение.
+     */
+    private suspend fun startServerDownloadAndWait(bookId: Int, chapterOrdinal: Int?) {
+        Log.d(TAG, "startServerDownloadAndWait bookId=$bookId")
         _state.update {
-            PlaybackUiState(
-                isConnected = it.isConnected,
+            it.copy(
                 preparing = true,
-                title = "Подготовка…",
+                title = "Подготовка книги на сервере…",
+                artist = null,
+                hasMedia = false,
+                offlineQueued = false,
             )
         }
-        retryCount = 0
+        // Пока ждём главы — показываем обложку книги, как только она известна.
+        applyBookCover(bookId)
 
-        val base = settings.baseUrlOrNull()
-            ?: throw IllegalStateException("Сервер не настроен")
-
-        runCatching { repository.startDownload(bookId) }
-
-        var detail = repository.getBook(bookId)
-        var attempts = 0
-        while (detail.chapters.isEmpty()) {
-            when (detail.status) {
-                BookStatus.error -> {
-                    _state.update { it.copy(preparing = false) }
-                    throw IllegalStateException("Сервер не смог загрузить книгу")
-                }
-                BookStatus.deleted -> {
-                    _state.update { it.copy(preparing = false) }
-                    throw IllegalStateException("Книга удалена")
-                }
-                else -> Unit
-            }
-
-            _state.update {
-                it.copy(
-                    title = detail.title,
-                    artist = when (detail.status) {
-                        BookStatus.announced -> "Сервер разбирает торрент…"
-                        BookStatus.downloading -> "Получаем список глав…"
-                        BookStatus.partial -> "Получаем список глав…"
-                        else -> "Подготовка…"
-                    },
-                )
-            }
-
-            delay(METADATA_POLL_MS)
-            attempts++
-            detail = runCatching { repository.getBook(bookId) }.getOrNull() ?: detail
-
-            if (attempts > MAX_METADATA_ATTEMPTS) {
+        // Сообщаем серверу о начале загрузки (POST /books/{id}/download).
+        val started = runCatching {
+            Log.d(TAG, "startServerDownload POST /books/$bookId/download")
+            repository.startDownload(bookId)
+        }
+        Log.d(TAG, "startServerDownload result failure=${started.isFailure} err=${started.exceptionOrNull()?.message}")
+        if (started.isFailure && repository.getChapters(bookId).isEmpty()) {
+            // На случай «already_done» пробуем ещё раз подтянуть карточку.
+            runCatching { repository.getReleaseDetailForBook(bookId, online = true) }
+            if (repository.getChapters(bookId).isEmpty()) {
                 _state.update { it.copy(preparing = false) }
-                throw IllegalStateException(
-                    "Сервер не вернул список глав. Проверьте статус загрузки.",
-                )
+                _error.value = "Не удалось начать загрузку на сервере: " +
+                    (started.exceptionOrNull()?.message ?: "неизвестная ошибка")
+                return
             }
         }
 
-        app.bookDownloads.enqueueBook(detail, base)
+        // Пока главы не появились — ждём (поллер на сервере создаёт их
+        // после появления файлов торрента).
+        val deadline = System.currentTimeMillis() + SERVER_PREPARE_TIMEOUT_MS
+        while (System.currentTimeMillis() < deadline && currentCoroutineContext().isActive) {
+            runCatching { repository.getReleaseDetailForBook(bookId, online = true) }
+            val chapters = repository.getChapters(bookId)
+            Log.d(TAG, "startServerDownload poll chapters=${chapters.size} elapsed=${System.currentTimeMillis() - (deadline - SERVER_PREPARE_TIMEOUT_MS)}ms")
+            if (chapters.isNotEmpty()) {
+                playLocal(bookId, chapters, chapterOrdinal)
+                return
+            }
+            // Главы ещё не созданы — держим обложку актуальной по мере синка.
+            applyBookCover(bookId)
+            // Страховка: если книга-карточка (announced-заглушка) была
+            // заменена сервером на другую книгу той же раздачи (например,
+            // структура торрента оказалась иной), переключаемся на неё —
+            // иначе поллинг «мёртвой» заглушки продолжался бы вечно.
+            val adopted = alternativeBookWithChapters(bookId)
+            if (adopted != null) {
+                Log.d(TAG, "startServerDownload adopt book=${adopted.first} (was bookId=$bookId) chapters=${adopted.second.size}")
+                playLocal(adopted.first, adopted.second, chapterOrdinal)
+                return
+            }
+            delay(SERVER_PREPARE_POLL_MS)
+        }
+        Log.d(TAG, "startServerDownload timeout: chapters not appeared")
 
-        // ---------- Восстановление позиции ----------
-        val items = detail.chapters.map { chapter -> chapter.toMediaItem(detail, base) }
+        // Не дождались глав — помечаем раздачу для фоновой докачки,
+        // серверная загрузка уже запущена и поллер продолжит свою работу.
+        _state.update {
+            it.copy(
+                preparing = false,
+                offlineQueued = true,
+                title = "Книга готовится на сервере",
+            )
+        }
+        val book = repository.getBookEntity(bookId)
+        val releaseId = book?.releaseId
+        if (releaseId != null) {
+            repository.setReleaseQueued(releaseId, true)
+        }
+    }
+
+    /** Ищет в той же раздаче книгу (кроме заданной) с уже созданными главами. */
+    private suspend fun alternativeBookWithChapters(bookId: Int): Pair<Int, List<ChapterEntity>>? {
+        val releaseId = repository.getBookEntity(bookId)?.releaseId ?: return null
+        for (b in repository.getBooksByRelease(releaseId)) {
+            if (b.id == bookId) continue
+            val chapters = repository.getChapters(b.id)
+            if (chapters.isNotEmpty()) return b.id to chapters
+        }
+        return null
+    }
+
+    private suspend fun playLocal(bookId: Int, chapters: List<ChapterEntity>, chapterOrdinal: Int?) {
+        Log.d(TAG, "playLocal bookId=$bookId chapters=${chapters.size} chapterOrdinal=$chapterOrdinal")
+
+        playerScreenBookId = bookId
+
+        val online = app.serverMonitor.availability.value ==
+            ru.burkut.audiobooks.data.ServerAvailability.Online
+
+        // Состав плейлиста определяет источник (BookStorage): онлайн — все главы
+        // (недостающие докачает очередь, плеер стартует на растущем .part),
+        // оффлайн — только реально присутствующие файлы. Плеер просто играет то,
+        // что ему дали, и не занимается проверкой кэша.
+        val playlist = storage.playableChapters(chapters, online)
+        Log.d(TAG, "playLocal online=$online playable=${playlist.size}/${chapters.size}")
+
+        // Нечего играть локально и дотянуть нечем — книга уходит в очередь.
+        if (playlist.isEmpty()) {
+            _state.update { it.copy(preparing = false, isBuffering = false) }
+            queueReleaseForBook(bookId)
+            return
+        }
+
+        // Стартовая глава: явный ordinal либо из сохранённого прогресса.
+        // Всегда должна присутствовать в плейлисте — иначе начинаем с первой
+        // доступной (в оффлайне пропущенные главы не должны блокировать старт).
+        val requestedOrdinal = chapterOrdinal ?: run {
+            val saved = repository.getProgress(bookId)
+            if (saved != null && playlist.any { it.ordinal == saved.chapterOrdinal }) {
+                saved.chapterOrdinal
+            } else {
+                null
+            }
+        }
+        val startOrdinal = requestedOrdinal?.takeIf { o -> playlist.any { it.ordinal == o } }
+            ?: playlist.first().ordinal
+
+        // Книга теперь воспроизводится — её главы переносятся в НАЧАЛО очереди,
+        // причём стартовая глава встаёт самой первой: строгая FIFO докачает её
+        // полностью раньше остальных, и плеер стартует максимально близко к
+        // моменту готовности файла на сервере.
+        downloadQueue.promoteBook(bookId, startOrdinal)
+
+        // Докачиваем те главы, которых нет локально (только онлайн), и ждём,
+        // пока источник подтвердит готовность файла стартовой главы.
+        ensureChaptersDownloaded(bookId, chapters, startOrdinal)
+
+        val book = repository.getBookEntity(bookId)
+        val coverUri = book?.coverUrl?.let { Uri.parse(it) }
+
+        // Оффлайн обложку берём из локального кэша (файл рядом с аудио) —
+        // сервер недоступен, тянуть картинку неоткуда. Онлайн показываем
+        // серверную обложку сразу, а финальную подхватываем опросом заголовков.
+        val localCover = coverStore.cachedBookCover(bookId)
+        if (!online && localCover != null) {
+            currentCoverUrl = Uri.fromFile(localCover).toString()
+        } else {
+            currentCoverUrl = book?.coverUrl
+        }
+        if (online && book?.coverIsTemp == true) {
+            startCoverPolling(bookId, book.coverUrl)
+        } else {
+            coverPollJob?.cancel()
+        }
+
+        // Для растущих .part-файлов сообщаем фабрике целевой размер главы —
+        // GrowingFileDataSource должен знать, когда глава закончится.
+        for (ch in playlist) {
+            app.localDataSourceFactory.setTargetLength(bookId, ch.ordinal, ch.sizeBytes)
+        }
+
+        val items = playlist.map { ch ->
+            MediaItem.Builder()
+                .setMediaId(chapterMediaId(bookId, ch.ordinal))
+                .setUri(Uri.fromFile(storage.playbackFile(bookId, ch.ordinal)))
+                .setMediaMetadata(
+                    MediaMetadata.Builder()
+                        .setTitle(ch.title ?: "Глава ${ch.ordinal}")
+                        .setArtist(book?.title ?: "")
+                        .setArtworkUri(coverUri)
+                        .build(),
+                )
+                .build()
+        }
+
         var index = 0
         var position = 0L
-
-        if (chapterId != null) {
-            // Явно указана глава (тап по списку) — начинаем с неё.
-            index = detail.chapters.indexOfFirst { it.id == chapterId }.coerceAtLeast(0)
+        if (chapterOrdinal != null) {
+            index = playlist.indexOfFirst { it.ordinal == chapterOrdinal }.coerceAtLeast(0)
         } else {
-            // Продолжаем с сохранённого места (кнопка «Слушать»).
             val saved = repository.getProgress(bookId)
             if (saved != null) {
-                val idx = detail.chapters.indexOfFirst { it.id == saved.chapterId }
+                val idx = playlist.indexOfFirst { it.ordinal == saved.chapterOrdinal }
                 if (idx >= 0) {
-                    val chapter = detail.chapters[idx]
-                    val nearEnd = chapter.duration_sec != null &&
-                            saved.positionMs >= chapter.duration_sec * 1000L - 2000L
-
+                    val ch = playlist[idx]
+                    val chDuration = (ch.localDurationSec ?: ch.durationSec ?: 0) * 1000L
+                    val nearEnd = chDuration > 0 &&
+                        saved.positionMs >= chDuration - 2000L
                     when {
-                        // Глава доиграна — начинаем следующую.
-                        nearEnd && idx + 1 < detail.chapters.size -> {
-                            index = idx + 1
-                            position = 0L
-                        }
-                        // Доиграна последняя — начинаем её же с начала.
-                        nearEnd -> {
-                            index = idx
-                            position = 0L
-                        }
-                        // Обычный случай: продолжаем с сохранённой позиции.
-                        else -> {
-                            index = idx
-                            position = saved.positionMs
-                        }
+                        nearEnd && idx + 1 < playlist.size -> { index = idx + 1; position = 0L }
+                        nearEnd -> { index = idx; position = 0L }
+                        else -> { index = idx; position = saved.positionMs }
                     }
                 }
             }
@@ -406,37 +828,217 @@ class PlayerViewModel(application: Application) : ViewModel() {
         controller.setMediaItems(items, index, position)
         controller.prepare()
         controller.play()
+        // Снимаем «колесо» сразу после старта: измерение длительностей глав —
+        // независимая операция, она не должна задерживать начало воспроизведения
+        // (особенно в оффлайне, когда книга уже полностью скачана).
+        _state.update { it.copy(preparing = false, isBuffering = false) }
+        updateBookProgress()
+    }
 
-        _state.update { it.copy(preparing = false) }
+    /**
+     * Опрашивает готовность финальной обложки, пока сервер отдаёт временную
+     * (заголовок X-Cover-Temp). Каждую итерацию запрашивает только заголовки
+     * (HEAD /books/{id}/cover), а не карточку книги и не саму картинку. Пока
+     * обложка временная — обновляет [currentCoverUrl] тем же URL с cache-busting
+     * nonce (Coil перечитывает картинку), как только признак снят — фиксирует
+     * финальный URL и выходит. Ошибки сети не фатальны: просто повторим позже.
+     */
+    private fun startCoverPolling(bookId: Int, initialCoverUrl: String?) {
+        coverPollJob?.cancel()
+        if (initialCoverUrl == null) return
+        coverPollJob = viewModelScope.launch {
+            var attempt = 0
+            while (isActive && attempt < COVER_POLL_MAX_ATTEMPTS) {
+                val isTemp = repository.coverIsTemp(bookId)
+                if (isTemp == false) {
+                    // Финал: сохраняем обложку в локальный файл и показываем
+                    // её — дальше она доступна оффлайн без сервера.
+                    val local = coverStore.ensureBookCover(bookId, force = true)
+                    currentCoverUrl = local?.let { Uri.fromFile(it).toString() }
+                        ?: coverUrlWithNonce(initialCoverUrl)
+                    return@launch
+                }
+                if (isTemp == true) {
+                    currentCoverUrl = coverUrlWithNonce(initialCoverUrl)
+                }
+                attempt++
+                delay(COVER_POLL_INTERVAL_MS)
+            }
+        }
+    }
+
+    /** Дописывает cache-busting nonce, чтобы Coil перечитал обложку. */
+    private fun coverUrlWithNonce(url: String): String {
+        val sep = if (url.contains('?')) '&' else '?'
+        return "$url${sep}v=${System.currentTimeMillis()}"
+    }
+
+    /**
+     * Пока книга готовится (глав ещё нет), держим в UI обложку этой книги, как
+     * только сервер её отдал: не перетираем уже показанную обложку и запускаем
+     * опрос финальной версии, если текущая — временная.
+     */
+    private suspend fun applyBookCover(bookId: Int) {
+        val b = repository.getBookEntity(bookId) ?: return
+        // Своя обложка книги; если сервер ещё не отдал её URL — подстраховываемся
+        // обложкой раздачи (карточки), чтобы плеер не оставался пустым.
+        val url = b.coverUrl
+            ?: repository.getReleaseEntity(b.releaseId)?.coverUrl
+            ?: return
+        if (currentCoverUrl.isNullOrEmpty()) {
+            currentCoverUrl = url
+            _state.update { it.copy(artUri = url) }
+        }
+        if (b.coverIsTemp) {
+            if (coverPollJob?.isActive != true) startCoverPolling(bookId, url)
+        } else {
+            coverPollJob?.cancel()
+        }
+    }
+
+    /**
+     * Пока книга раздачи ещё не появилась (сервер создаёт книги по факту
+     * сканирования торрента, книгу-заглушку не делает), держим в UI обложку
+     * карточки-раздачи — чтобы окно плеера не оставалось пустым. Уже
+     * показанную обложку не перетираем: у книги приоритет.
+     */
+    private suspend fun applyReleaseCover(releaseId: Int) {
+        if (!currentCoverUrl.isNullOrEmpty()) return
+        val url = repository.getReleaseEntity(releaseId)?.coverUrl ?: return
+        currentCoverUrl = url
+        _state.update { it.copy(artUri = url) }
+    }
+
+    /**
+     * Сброс обложки при старте новой книги/раздачи: останавливаем прежний опрос,
+     * очищаем URL, а также синхронно чистим медиаэлементы контроллера. Иначе во
+     * время ожидания (спиннер) в плеере продолжала бы показываться обложка
+     * предыдущей книги: либо из currentCoverUrl, либо из artworkUri ещё не
+     * выгруженного старого трека. Обложка новой книги появится в playLocal() —
+     * сначала временная (карточка раздачи), затем финальная.
+     */
+    private fun resetCurrentCover() {
+        coverPollJob?.cancel()
+        coverPollJob = null
+        currentCoverUrl = null
+        controllerOrNull?.let { c ->
+            c.stop()
+            c.clearMediaItems()
+        }
+        _state.update { it.copy(artUri = null) }
+    }
+
+    /**
+     * Докачивает недостающие главы через очередь (если сервер доступен) и ждёт,
+     * пока источник подтвердит готовность: файл главы, с которой начнётся
+     * воспроизведение, реально существует и содержит данные (готовый .mp3 или
+     * растущий .part). Плеер не начинает работу, пока файл не появился, — это
+     * исключает FileNotFoundException (ENOENT) при открытии ещё не созданного .part.
+     */
+    private suspend fun ensureChaptersDownloaded(
+        bookId: Int,
+        chapters: List<ChapterEntity>,
+        startOrdinal: Int?,
+    ) {
+        val online = app.serverMonitor.availability.value ==
+            ru.burkut.audiobooks.data.ServerAvailability.Online
+        if (!online) {
+            // Нет доступа: если книга частично есть — играем то, что есть;
+            // недостающее поставлено в очередь в DownloadQueue через ServerMonitor.
+            return
+        }
+        val missing = chapters.filterNot { storage.isChapterReady(it) }
+        if (missing.isEmpty()) return
+
+        // Стартовая глава — та, что плеер откроет первой.
+        val first = chapters.firstOrNull { it.ordinal == startOrdinal }
+            ?: missing.minByOrNull { it.ordinal }
+            ?: return
+        val base = settings.baseUrlOrNull() ?: ""
+        fun taskFor(ch: ChapterEntity) = DownloadTask(
+            bookId = bookId,
+            chapterId = ch.id,
+            ordinal = ch.ordinal,
+            sizeBytes = ch.sizeBytes,
+            url = absoluteUrl(base, "/books/$bookId/stream/${ch.id}"),
+        )
+
+        // Стартовую главу выносим в ГОЛОВУ очереди: строгая FIFO докачает её
+        // полностью раньше остальных — плеер не ждёт «своей очереди» среди
+        // других глав. Остальные главы книги встают за ней по возрастанию
+        // ordinal: пока голова не докачана, запросы по ним не отправляются.
+        downloadQueue.awaitChapter(taskFor(first))
+        for (ch in missing) {
+            if (ch.id == first.id) continue
+            downloadQueue.enqueue(taskFor(ch))
+        }
+        Log.d(TAG, "ensureChaptersDownloaded waiting for file book=$bookId ordinal=${first.ordinal}")
+        val deadline = System.currentTimeMillis() + CHAPTER_READY_TIMEOUT_MS
+        while (System.currentTimeMillis() < deadline && currentCoroutineContext().isActive) {
+            val f = storage.playbackFile(bookId, first.ordinal)
+            if (f.exists() && f.length() > 0) {
+                Log.d(TAG, "ensureChaptersDownloaded file ready: ${f.path} size=${f.length()}")
+                return
+            }
+            delay(CHAPTER_READY_POLL_MS)
+        }
+        Log.d(TAG, "ensureChaptersDownloaded timeout waiting for ordinal=${first.ordinal}")
+        // Файл так и не появился — очередь докачает его в фоне, а плеер
+        // стартует позже через локальный запрос (GrowingFileDataSource сам
+        // дождётся файла, если тот появится к моменту открытия).
+    }
+
+    /** Книга недоступна оффлайн — ставим раздачу в фоновую очередь. */
+    private suspend fun queueReleaseForBook(bookId: Int) {
+        Log.d(TAG, "queueReleaseForBook bookId=$bookId")
+        _state.update {
+            it.copy(preparing = false, offlineQueued = true, title = "Книга в очереди")
+        }
+        // Помечаем раздачу для фоновой докачки при появлении доступа к серверу.
+        val book = repository.getBookEntity(bookId)
+        val releaseId = book?.releaseId
+        if (releaseId != null) {
+            repository.setReleaseQueued(releaseId, true)
+        }
+        // DownloadQueue начнёт качать раздачу, как только ServerMonitor сообщит online.
+    }
+
+    /** После окончания последней главы книги — предложить следующий том. */
+    private fun maybeRequestNextVolume() {
+        viewModelScope.launch {
+            val mediaId = controllerOrNull?.currentMediaItem?.mediaId ?: return@launch
+            val parsed = parseMediaId(mediaId) ?: return@launch
+            val (bookId, _) = parsed
+            val book = repository.getBookEntity(bookId) ?: return@launch
+            val siblings = repository.getBooksByRelease(book.releaseId, bookId)
+            // Следующим будет том со следующим порядковым номером.
+            val next = siblings.firstOrNull { it.ordinal > book.ordinal }
+                ?: siblings.firstOrNull()
+                ?: return@launch
+            _requestNextVolume.value = next
+        }
     }
 
     companion object {
-        fun chapterMediaId(bookId: Int, chapterId: Int): String = "$bookId:$chapterId"
-        private const val MAX_RETRIES = 30
-        private const val RETRY_DELAY_MS = 2_000L
-        private const val METADATA_POLL_MS = 2_000L
-        private const val MAX_METADATA_ATTEMPTS = 150
+        private const val TAG = "PlayerVM"
+        fun chapterMediaId(bookId: Int, chapterOrdinal: Int): String = "$bookId:$chapterOrdinal"
         private const val SAVE_PROGRESS_INTERVAL_MS = 5_000L
+        /** Максимальное время ожидания появления глав после старта серверной загрузки. */
+        private const val SERVER_PREPARE_TIMEOUT_MS = 120_000L
+        /** Период опроса каталога, пока главы создаются на сервере. */
+        private const val SERVER_PREPARE_POLL_MS = 2_000L
+        /** Максимальное время ожидания появления файла главы перед стартом плеера.
+         *  Держим коротким: стартовая глава качается первой (сервер отключил
+         *  sequential), а если файл задержится — плеер стартует на растущем .part,
+         *  который сам дождётся появления данных. */
+        private const val CHAPTER_READY_TIMEOUT_MS = 20_000L
+        /** Период опроса готовности файла главы. */
+        private const val CHAPTER_READY_POLL_MS = 250L
+        /** Период опроса готовности финальной обложки. */
+        private const val COVER_POLL_INTERVAL_MS = 5_000L
+        /** Предохранитель: максимум итераций опроса обложки (≈10 минут). */
+        private const val COVER_POLL_MAX_ATTEMPTS = 120
     }
-}
-
-internal fun ChapterOut.toMediaItem(book: BookDetailOut, baseUrl: String): MediaItem {
-    val streamUrl = absoluteUrl(baseUrl, stream_url)
-    val coverUri = book.cover_url
-        ?.let { absoluteUrl(baseUrl, it) }
-        ?.let { Uri.parse(it) }
-    return MediaItem.Builder()
-        .setMediaId(PlayerViewModel.chapterMediaId(book.id, id))
-        .setUri(streamUrl)
-        .setMediaMetadata(
-            MediaMetadata.Builder()
-                .setTitle(title ?: "Глава $ordinal")
-                .setArtist(book.title)
-                .setAlbumTitle(book.title)
-                .setArtworkUri(coverUri)
-                .build(),
-        )
-        .build()
 }
 
 fun absoluteUrl(baseUrl: String, url: String): String =

@@ -70,8 +70,13 @@ class CoverService:
         try:
             r = await self._client.get(url)
             r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            # 4xx/5xx — мёртвая ссылка (фастпик и подобные удаляют файлы).
+            # Обычное явление при обходе каталога, логируем как INFO.
+            log.info("Обложка не скачана %s: %s", url, e)
+            return False
         except httpx.HTTPError as e:
-            log.warning("Обложка не скачана %s: %s", url, e)
+            log.warning("Обложка не скачана %s (сетевая ошибка): %s", url, e)
             return False
 
         mime = (r.headers.get("content-type") or "").split(";")[0].strip()

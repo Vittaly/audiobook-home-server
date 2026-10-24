@@ -78,6 +78,12 @@ async def sync_catalog(covers: CoverService) -> int:
     except asyncio.TimeoutError:
         log.warning(">>> sync_catalog: прерван по таймауту %d сек", timeout)
         return 0
+    except asyncio.CancelledError:
+        # Иногда wait_for пробрасывает CancelledError внутренней задачи вместо
+        # TimeoutError (особенно при остановке планировщика). Это ожидаемое
+        # событие, а не ошибка — логируем и завершаемся.
+        log.info(">>> sync_catalog: отменён")
+        return 0
 
 
 async def _sync_catalog_inner(covers: CoverService) -> int:
@@ -126,13 +132,18 @@ async def _sync_catalog_inner(covers: CoverService) -> int:
 async def _process_item(item: dict, covers: CoverService,
                         sem: asyncio.Semaphore) -> int:
     """
-    Обрабатывает одну раздачу.
+    Обрабатывает одну запись поисковой выдачи (upsert карточки,
+    дозаполнение деталей и обложки).
 
-    ВАЖНО: сеть (детальная страница, скачивание обложки) выполняется БЕЗ
-    открытой транзакции БД. Иначе во время await держится write-лок SQLite,
-    и поллер/API падают с "database is locked".
+    ВАЖНО про блокировки SQLite (WAL): карточку upsert'им и КОММИТИМ
+    отдельной короткой транзакцией, а сетевые запросы (детальная страница,
+    обложка) выполняем ПОСЛЕ коммита, когда write-лок уже освобождён.
+
+    Если держать write-лок (взятый на db.flush() в _upsert_release) через
+    await'ы сети, другой пишущий — поллер торрентов — ждёт до
+    busy_timeout=30с и падает с "database is locked": статусы глав не
+    становятся ready, стриминг отдаёт 409, плеер клиента висит в ожидании.
     """
-    # --- 1. короткая транзакция: UPSERT карточки, читаем состояние ---
     with _sync_session() as db:
         release = _upsert_release(db, item)
         if release is None:
@@ -167,6 +178,21 @@ async def _process_item(item: dict, covers: CoverService,
 # UPSERT КАРТОЧКИ РАЗДАЧИ
 # ============================================================
 
+def _parse_tracker_date(value: str | None) -> datetime:
+    """Дата создания раздачи на трекере ('YYYY-MM-DD') -> datetime (UTC).
+
+    Если дата отсутствует или некорректна — текущее время (UTC), чтобы
+    NOT NULL-поле released_at всегда было заполнено.
+    """
+    if value:
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").replace(
+                tzinfo=timezone.utc)
+        except ValueError:
+            log.warning(">>> ingest: некорректная дата трекера: %r", value)
+    return datetime.now(timezone.utc)
+
+
 def _upsert_release(db: Session, item: dict) -> Release | None:
     """item нормализован rutor.fetch_search_page: title, author, year готовы."""
     torrent_hash = item["torrent_hash"]
@@ -177,6 +203,10 @@ def _upsert_release(db: Session, item: dict) -> Release | None:
 
     if release is not None:
         release.last_seen_at = datetime.now(timezone.utc)
+        # Легаси-запись без даты трекера: заполняем один раз. Уже
+        # установленную дату не трогаем, чтобы не сбрасывать её при обходе.
+        if release.released_at is None:
+            release.released_at = _parse_tracker_date(item.get("added_at"))
         return release
 
     # Раздача без torrent_hash непригодна для скачивания — пропускаем,
@@ -211,6 +241,7 @@ def _upsert_release(db: Session, item: dict) -> Release | None:
             magnet=item["magnet"],
             save_path=str(settings.downloads_dir / sanitize_name(title)),
             content_type=item["content_type"],
+            released_at=_parse_tracker_date(item.get("added_at")),
         )
         db.add(release)
         db.flush()
@@ -232,34 +263,7 @@ def _upsert_release(db: Session, item: dict) -> Release | None:
     release.last_seen_at = datetime.now(timezone.utc)
     db.flush()
 
-    # пока структура торрента неизвестна — в раздаче одна книга-«заглушка»
-    _ensure_single_book(db, release)
-
     return release
-
-
-def _ensure_single_book(db: Session, release: Release) -> Book:
-    """
-    Гарантирует, что у раздачи есть хотя бы одна книга.
-    До скана структуры это одна «книга-заглушка» с ordinal=1 и
-    названием из карточки. После ingest_release книги пересоздаются
-    по фактической структуре торрента.
-    """
-    if release.books:
-        return release.books[0]
-
-    book = Book(
-        release_id=release.id,
-        ordinal=1,
-        folder=None,
-        title=release.title,
-        title_norm=release.title_norm,
-        title_raw=release.title_raw,
-        status=BookStatus.ANNOUNCED.value,
-    )
-    db.add(book)
-    db.flush()
-    return book
 
 
 # ============================================================
@@ -450,9 +454,9 @@ def ingest_release(release_id: int, files: list[dict], torrent_name: str,
         иначе сохраняет cover_path_hint для последующей докачки;
       - определяет серию (глобально по каталогу).
 
-    У многотомных раздач (len(groups) > 1) книга без своей обложки получает
-    cover_is_temp=True: пока своя обложка не получена (файл докачан или
-    найден онлайн), клиент видит обложку карточки-раздачи.
+    Книга без своей обложки получает cover_is_temp=True: пока своя обложка
+    не получена (файл из торрента докачан или найден онлайн), клиент видит
+    обложку карточки-раздачи — осмысленную картинку, а не заглушку.
 
     Возвращает количество созданных глав.
     """
@@ -484,7 +488,7 @@ def ingest_release(release_id: int, files: list[dict], torrent_name: str,
         # уже удалённую книгу → FOREIGN KEY constraint failed.
         for i, group in enumerate(groups):
             book = _upsert_book_from_group(
-                db, release, i + 1, group, covers, is_multi=is_multi)
+                db, release, i + 1, group, covers)
             if book is None:
                 continue
             created += _append_chapters(book, release, group)
@@ -509,8 +513,7 @@ def ingest_release(release_id: int, files: list[dict], torrent_name: str,
 
 
 def _upsert_book_from_group(db: Session, release: Release, ordinal: int,
-                            group: dict, covers: CoverService,
-                            is_multi: bool = False) -> Book | None:
+                            group: dict, covers: CoverService) -> Book | None:
     """Находит или создаёт книгу раздачи по folder, заполняет поля и обложку."""
     title = group.get("title") or release.title
     title_norm = _norm(title)
@@ -560,11 +563,10 @@ def _upsert_book_from_group(db: Session, release: Release, ordinal: int,
             return book
 
     # --- своей обложки нет ---
-    # у многотомной раздачи показываем обложку карточки, пока свою не получим
-    if is_multi:
-        book.cover_is_temp = True
-    else:
-        book.cover_is_temp = False
+    # Показываем обложку карточки-раздачи как временную (cover_is_temp=True)
+    # до тех пор, пока не получим свою: файл из торрента либо обложку из
+    # интернета. Так клиент всегда видит осмысленную картинку, а не заглушку.
+    book.cover_is_temp = True
 
     return book
 

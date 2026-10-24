@@ -1,5 +1,3 @@
-@file:OptIn(androidx.media3.common.util.UnstableApi::class)
-
 package ru.burkut.audiobooks.ui.detail
 
 import android.app.Application
@@ -11,21 +9,30 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import retrofit2.HttpException
 import ru.burkut.audiobooks.App
-import ru.burkut.audiobooks.data.api.BookDetailOut
+import ru.burkut.audiobooks.data.ServerAvailability
 import ru.burkut.audiobooks.data.api.BookStatus
 import ru.burkut.audiobooks.data.api.DownloadStatusOut
+import ru.burkut.audiobooks.data.db.BookEntity
+import ru.burkut.audiobooks.data.db.ChapterEntity
 import ru.burkut.audiobooks.data.db.ProgressEntity
-import java.io.IOException
 
-data class DetailState(
+/** Состояние карточки книги (тома). */
+data class BookDetailUiState(
     val loading: Boolean = true,
     val error: String? = null,
-    val book: BookDetailOut? = null,
-    val download: DownloadStatusOut? = null,
+    val book: BookEntity? = null,
+    val chapters: List<ChapterEntity> = emptyList(),
+    val isServerOnline: Boolean = false,
+    /** Статус книги на сервере (getBookDetail / getDownloadStatus). */
+    val serverStatus: BookStatus? = null,
+    /** Детали загрузки на сервере (когда идёт качание торрента). */
+    val serverDownload: DownloadStatusOut? = null,
+    /** Локальный статус книги на устройстве: absent | downloading | partial | ready. */
+    val deviceStatus: String = "absent",
+    /** Раздача поставлена в фоновую докачку на устройство. */
+    val queued: Boolean = false,
     val progress: ProgressEntity? = null,
-    val cache: Map<String, androidx.media3.exoplayer.offline.Download> = emptyMap(),
 )
 
 class BookDetailViewModel(
@@ -35,100 +42,140 @@ class BookDetailViewModel(
 
     private val app: App = application as App
     private val repository = app.repository
+    private val storage = app.storage
 
-    private val _state = MutableStateFlow<DetailState>(DetailState())
-    val state: StateFlow<DetailState> = _state.asStateFlow()
+    private val _state = MutableStateFlow(BookDetailUiState())
+    val state: StateFlow<BookDetailUiState> = _state.asStateFlow()
+
+    private var pollJob: kotlinx.coroutines.Job? = null
 
     init {
+        // Книга из локального кэша (оффлайн-first).
         viewModelScope.launch {
-            app.downloadObserver.downloads.collect { cache ->
-                _state.update { it.copy(cache = cache) }
+            val book = repository.getBookEntity(bookId)
+            _state.update { it.copy(book = book, loading = book == null) }
+            if (book != null) {
+                // Флаг «в очереди» хранится на раздаче.
+                val rel = repository.getReleaseEntity(book.releaseId)
+                _state.update { it.copy(queued = rel?.queuedForDevice ?: false) }
+            }
+            refresh()
+        }
+
+        // Главы из кэша + статус устройства пересчитываем по ним.
+        viewModelScope.launch {
+            repository.observeChapters(bookId).collect { chapters ->
+                _state.update { it.copy(chapters = chapters, deviceStatus = deviceStatusOf(chapters)) }
             }
         }
-        load()
+
+        // Доступность сервера — для индикатора и сетевых статусов.
+        viewModelScope.launch {
+            app.serverMonitor.availability.collect { avail ->
+                val online = avail == ServerAvailability.Online
+                _state.update { it.copy(isServerOnline = online) }
+                if (online) refreshServerStatus() else stopServerPolling()
+            }
+        }
     }
 
-    private fun load() {
+    /** Полное обновление: книга + прогресс + серверный статус. */
+    fun refresh() {
         viewModelScope.launch {
-            _state.update { it.copy(loading = true, error = null) }
-            try {
-                val book = repository.getBook(bookId)
-                val progress = repository.getProgress(bookId)
-                _state.update { it.copy(loading = false, book = book, progress = progress) }
-                if (book.status == BookStatus.downloading || book.status == BookStatus.partial) {
-                    pollDownloadStatus()
+            val book = repository.getBookEntity(bookId)
+            val progress = repository.getProgress(bookId)
+            _state.update { it.copy(book = book, loading = false, error = null, progress = progress) }
+            refreshServerStatus()
+        }
+    }
+
+    private fun refreshServerStatus() {
+        viewModelScope.launch {
+            val online = _state.value.isServerOnline
+            if (!online) {
+                _state.update { it.copy(serverStatus = null, serverDownload = null) }
+                stopServerPolling()
+                return@launch
+            }
+            // Свежая карточка книги с сервера (статус загрузки сервером).
+            val detail = repository.getBookDetail(bookId, online)
+            if (detail != null) {
+                _state.update { st -> st.copy(serverStatus = detail.status) }
+            }
+            val status = _state.value.serverStatus
+            if (status == BookStatus.downloading || status == BookStatus.partial) {
+                startServerPolling()
+            } else {
+                _state.update { it.copy(serverDownload = null) }
+                stopServerPolling()
+            }
+        }
+    }
+
+    private fun startServerPolling() {
+        if (pollJob?.isActive == true) return
+        pollJob = viewModelScope.launch {
+            while (true) {
+                val st = try {
+                    repository.getDownloadStatus(bookId)
+                } catch (e: Exception) {
+                    null
                 }
-            } catch (e: IOException) {
-                _state.update { it.copy(loading = false, error = "Нет соединения с сервером") }
-            } catch (e: HttpException) {
-                _state.update { it.copy(loading = false, error = "Ошибка сервера: ${e.code()}") }
-            } catch (e: IllegalStateException) {
-                _state.update { it.copy(loading = false, error = e.message) }
-            }
-        }
-    }
-
-    private suspend fun pollDownloadStatus() {
-        while (true) {
-            val st = try {
-                repository.getDownloadStatus(bookId)
-            } catch (e: Exception) {
-                return
-            }
-            _state.update { it.copy(download = st) }
-            if (st.status != BookStatus.downloading && st.status != BookStatus.partial) return
-            delay(2000)
-        }
-    }
-
-    fun startDownload() {
-        viewModelScope.launch {
-            try {
-                repository.startDownload(bookId)
-                pollDownloadStatus()
-            } catch (e: HttpException) {
-                if (e.code() == 409) {
-                    pollDownloadStatus()
-                } else {
-                    _state.update { it.copy(error = "Ошибка сервера: ${e.code()}") }
+                if (st != null) {
+                    _state.update { it.copy(serverDownload = st) }
+                    if (st.status != BookStatus.downloading && st.status != BookStatus.partial) {
+                        _state.update { it.copy(serverStatus = st.status) }
+                        stopServerPolling()
+                        return@launch
+                    }
                 }
-            } catch (e: Exception) {
-                _state.update { it.copy(error = e.message) }
+                delay(2000)
             }
         }
     }
 
-    fun stopDownload() {
+    private fun stopServerPolling() {
+        pollJob?.cancel()
+        pollJob = null
+    }
+
+    /** Удалить локальные файлы книги с устройства (сам торрент на сервере не трогаем). */
+    fun deleteFromDevice() {
         viewModelScope.launch {
-            runCatching { repository.stopDownload(bookId) }
-            load()
+            val book = _state.value.book ?: return@launch
+            // Удаляем файлы с устройства.
+            runCatching { storage.bookDir(bookId).deleteRecursively() }
+            // Сбрасываем локальный статус глав и книги.
+            val chapters = repository.getChapters(bookId)
+            for (ch in chapters) {
+                repository.updateChapterLocal(ch.id, "absent", 0)
+            }
+            repository.updateBookLocal(bookId, "absent", 0, book.sizeBytes ?: 0)
+            repository.clearProgress(bookId)
+            refresh()
         }
     }
 
-    fun deleteBook(onDeleted: () -> Unit = {}) {
-        val book = _state.value.book ?: return
-        app.bookDownloads.removeBook(book)
-        viewModelScope.launch {
-            try {
-                repository.clearProgress(bookId)
-                repository.deleteBook(bookId)
-                onDeleted()
-            } catch (e: Exception) {
-                _state.update { it.copy(error = e.message) }
+    private fun deviceStatusOf(chapters: List<ChapterEntity>): String {
+        if (chapters.isEmpty()) return "absent"
+        var ready = 0
+        var downloading = 0
+        for (ch in chapters) {
+            when (ch.localStatus) {
+                "ready" -> ready++
+                "downloading", "partial" -> downloading++
             }
         }
+        return when {
+            ready == chapters.size -> "ready"
+            downloading > 0 -> "downloading"
+            ready > 0 -> "partial"
+            else -> "absent"
+        }
     }
 
-    fun downloadToCache() {
-        val book = _state.value.book ?: return
-        val base = app.settings.baseUrlOrNull() ?: return
-        app.bookDownloads.enqueueBook(book, base)
+    override fun onCleared() {
+        stopServerPolling()
+        super.onCleared()
     }
-
-    fun removeFromCache() {
-        val book = _state.value.book ?: return
-        app.bookDownloads.removeBook(book)
-    }
-
-    fun refresh() = load()
 }

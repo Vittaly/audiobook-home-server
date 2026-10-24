@@ -4,103 +4,219 @@ import android.app.Application
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import retrofit2.HttpException
 import ru.burkut.audiobooks.App
-import ru.burkut.audiobooks.data.api.BookOut
-import java.io.IOException
+import ru.burkut.audiobooks.data.ServerAvailability
+import ru.burkut.audiobooks.data.db.BookEntity
+import ru.burkut.audiobooks.data.db.ReleaseEntity
 
-class CatalogViewModel(app: Application) : ViewModel() {
+/** Режим сортировки каталога раздач. */
+enum class CatalogSort {
+    /** По дате релиза: сначала самые свежие. */
+    DATE_DESC,
 
-    private val repository = (app as App).repository
+    /** По названию, по возрастанию. */
+    TITLE_ASC,
 
-    val query = MutableStateFlow("")
-    val rubric = MutableStateFlow<String?>(null)
+    /** По году, сначала более новые. */
+    YEAR_DESC,
+}
 
-    private val _books = MutableStateFlow<List<BookOut>>(emptyList())
-    val books: StateFlow<List<BookOut>> = _books.asStateFlow()
+/** Опция фильтра по серии (строится из кэша книг). */
+data class SeriesOption(val id: Int, val title: String)
 
-    private val _rubrics = MutableStateFlow<List<String>>(emptyList())
-    val rubrics: StateFlow<List<String>> = _rubrics.asStateFlow()
+/** Состояние фильтрации каталога. */
+data class CatalogFilters(
+    val query: String = "",
+    val rubric: String? = null,
+    val seriesId: Int? = null,
+    val sort: CatalogSort = CatalogSort.DATE_DESC,
+) {
+    /** Активен ли хотя бы один фильтр/поиск (сортировка не считается). */
+    val isActive: Boolean get() = query.isNotBlank() || rubric != null || seriesId != null
+}
 
-    private val _total = MutableStateFlow(0)
-    val total: StateFlow<Int> = _total.asStateFlow()
+/** Готовое к отрисовке состояние экрана каталога. */
+data class CatalogUiState(
+    val releases: List<ReleaseEntity> = emptyList(),
+    val totalCount: Int = 0,
+    val availableRubrics: List<String> = emptyList(),
+    val availableSeries: List<SeriesOption> = emptyList(),
+    val filters: CatalogFilters = CatalogFilters(),
+    val isServerOnline: Boolean = false,
+)
+
+/**
+ * Каталог раздач: cache-first.
+ *
+ * Данные читаются только из Room (работает оффлайн). Поиск по названию/автору,
+ * фильтрация по рубрикам и сериям, а также сортировка выполняются на клиенте,
+ * поверх кэша — сервер для этого не требуется.
+ */
+class CatalogViewModel(application: Application) : ViewModel() {
+
+    private val app = application as App
+    private val repository = app.repository
+
+    private val _filters = MutableStateFlow(CatalogFilters())
+    val filters: StateFlow<CatalogFilters> = _filters.asStateFlow()
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
-    private val _error = MutableStateFlow<String?>(null)
-    val error: StateFlow<String?> = _error.asStateFlow()
+    private val _isServerOnline = MutableStateFlow(false)
+    val isServerOnline: StateFlow<Boolean> = _isServerOnline.asStateFlow()
 
-    private var offset = 0
-    private var hasMore = true
-    private var loading = false
+    private val _cachedAtMinute = MutableStateFlow(0L)
+    val cachedAtMinute: StateFlow<Long> = _cachedAtMinute.asStateFlow()
+
+    // Все раздачи и книги из кэша (до фильтрации).
+    private val allReleases: StateFlow<List<ReleaseEntity>> =
+        repository.observeReleases()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    private val allBooks: StateFlow<List<BookEntity>> =
+        repository.observeAllBooks()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** Единое состояние экрана: применяет поиск, фильтры и сортировку к кэшу. */
+    val state: StateFlow<CatalogUiState> =
+        combine(
+            allReleases,
+            allBooks,
+            _filters,
+            _isLoading,
+            _isServerOnline,
+        ) { releases, books, filters, _loadingUnused, online ->
+            CatalogUiState(
+                releases = applyFilters(releases, books, filters),
+                totalCount = releases.size,
+                availableRubrics = rubricOptions(releases),
+                availableSeries = seriesOptions(books),
+                filters = filters,
+                isServerOnline = online,
+            )
+        }.stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            CatalogUiState(),
+        )
 
     init {
         viewModelScope.launch {
-            combine(query.debounce(350), rubric) { q, r -> q to r }
-                .distinctUntilChanged()
-                .collect { (q, r) -> reload(q, r) }
+            app.serverMonitor.availability.collect { avail ->
+                _isServerOnline.value = avail == ServerAvailability.Online
+            }
         }
-    }
-
-    fun selectRubric(r: String?) {
-        rubric.value = if (rubric.value == r) null else r
+        refresh()
     }
 
     fun refresh() {
-        viewModelScope.launch { reload(query.value, rubric.value) }
-    }
-
-    fun loadMore() {
-        viewModelScope.launch { loadNext(query.value, rubric.value) }
-    }
-
-    private suspend fun reload(q: String, r: String?) {
-        offset = 0
-        hasMore = true
-        _books.value = emptyList()
-        _rubrics.value = emptyList()
-        _error.value = null
-        loadNext(q, r)
-    }
-
-    private suspend fun loadNext(q: String, r: String?) {
-        if (loading || !hasMore) return
-        val first = offset == 0
-        loading = true
-        _isLoading.value = true
-        try {
-            val resp = repository.listBooks(
-                query = q.ifEmpty { null },
-                rubric = r,
-                limit = PAGE_SIZE,
-                offset = offset,
-            )
-            offset += resp.items.size
-            hasMore = resp.items.size == PAGE_SIZE && offset < resp.total
-            _total.value = resp.total
-            _books.update { old -> if (first) resp.items else old + resp.items }
-            _rubrics.update { old -> (old + resp.items.flatMap { it.rubrics }).distinct().sorted() }
-        } catch (e: IOException) {
-            if (_books.value.isEmpty()) _error.value = "Нет соединения с сервером"
-        } catch (e: HttpException) {
-            if (_books.value.isEmpty()) _error.value = "Ошибка сервера: ${e.code()}"
-        } catch (e: IllegalStateException) {
-            _error.value = e.message
-        } finally {
-            loading = false
-            _isLoading.value = false
+        viewModelScope.launch {
+            _isLoading.value = true
+            try {
+                runCatching { repository.syncReleases() }
+                _cachedAtMinute.value = System.currentTimeMillis() / 60_000
+            } finally {
+                _isLoading.value = false
+            }
         }
     }
 
-    companion object {
-        private const val PAGE_SIZE = 50
+    // ---------- Изменение фильтров ----------
+
+    fun setQuery(query: String) {
+        _filters.update { it.copy(query = query) }
     }
+
+    /** Повторное нажатие на ту же рубрику снимает фильтр. */
+    fun setRubric(rubric: String?) {
+        _filters.update { it.copy(rubric = if (it.rubric == rubric) null else rubric) }
+    }
+
+    /** Повторное нажатие на ту же серию снимает фильтр. */
+    fun setSeries(seriesId: Int?) {
+        _filters.update { it.copy(seriesId = if (it.seriesId == seriesId) null else seriesId) }
+    }
+
+    fun setSort(sort: CatalogSort) {
+        _filters.update { it.copy(sort = sort) }
+    }
+
+    /** Сбрасывает поиск и фильтры (сортировку сохраняет). */
+    fun resetFilters() {
+        _filters.update { it.copy(query = "", rubric = null, seriesId = null) }
+    }
+
+    // ---------- Чистые функции фильтрации/сортировки ----------
+
+    private fun applyFilters(
+        releases: List<ReleaseEntity>,
+        books: List<BookEntity>,
+        filters: CatalogFilters,
+    ): List<ReleaseEntity> {
+        // Сопоставление раздача -> множество id серий её книг (из кэша).
+        val seriesByRelease: Map<Int, Set<Int>> = books
+            .mapNotNull { book -> book.seriesId?.let { book.releaseId to it } }
+            .groupBy({ it.first }, { it.second })
+            .mapValues { (_, ids) -> ids.toSet() }
+
+        val q = filters.query.trim().lowercase()
+
+        return releases
+            .asSequence()
+            .filter { rel ->
+                q.isEmpty() ||
+                    rel.title.lowercase().contains(q) ||
+                    rel.author?.lowercase()?.contains(q) == true
+            }
+            .filter { rel ->
+                val rubric = filters.rubric
+                rubric == null || rel.rubricList().any { it.equals(rubric, ignoreCase = true) }
+            }
+            .filter { rel ->
+                val seriesId = filters.seriesId
+                seriesId == null || seriesByRelease[rel.id]?.contains(seriesId) == true
+            }
+            .sortedWith(comparatorFor(filters.sort))
+            .toList()
+    }
+
+    private fun comparatorFor(sort: CatalogSort): Comparator<ReleaseEntity> = when (sort) {
+        // releasedAt — дата создания раздачи на трекере (ISO-8601): лексикографический
+        // порядок совпадает с хронологическим, поэтому обратная сортировка даёт
+        // свежие сверху. Если даты трекера нет — откатываемся к addedAt.
+        CatalogSort.DATE_DESC -> compareByDescending { it.releasedAt ?: it.addedAt }
+        CatalogSort.TITLE_ASC -> compareBy { it.title.lowercase() }
+        CatalogSort.YEAR_DESC -> compareByDescending { it.year ?: 0 }
+    }
+
+    /** Список доступных рубрик каталога (из кэша раздач). */
+    private fun rubricOptions(releases: List<ReleaseEntity>): List<String> =
+        releases
+            .flatMap { it.rubricList() }
+            .filter { it.isNotBlank() }
+            .distinctBy { it.lowercase() }
+            .sorted()
+
+    /** Список доступных серий (из кэша книг, чьи тома уже загружены). */
+    private fun seriesOptions(books: List<BookEntity>): List<SeriesOption> =
+        books
+            .mapNotNull { book ->
+                val id = book.seriesId ?: return@mapNotNull null
+                val title = book.seriesTitle?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                SeriesOption(id, title)
+            }
+            .distinctBy { it.id }
+            .sortedBy { it.title.lowercase() }
 }
+
+/** Рубрики раздачи хранятся в кэше одной строкой, разделённой переводами строк. */
+private fun ReleaseEntity.rubricList(): List<String> =
+    rubrics?.split("\n")?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()

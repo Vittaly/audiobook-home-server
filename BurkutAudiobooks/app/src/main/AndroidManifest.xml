@@ -9,6 +9,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- уведомления «книга готова» (API 33+) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- на API 33+ для mDNS-обнаружения локального сервера -->
     <uses-permission
         android:name="android.permission.NEARBY_WIFI_DEVICES"

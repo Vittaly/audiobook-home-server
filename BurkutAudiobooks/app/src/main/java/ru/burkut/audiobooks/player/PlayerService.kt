@@ -1,7 +1,6 @@
 package ru.burkut.audiobooks.player
 
 import android.app.PendingIntent
-import android.content.ComponentName
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
@@ -57,8 +56,9 @@ class PlayerService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
+        val app = application as App
         val player = ExoPlayer.Builder(this)
-            .setMediaSourceFactory((application as App).mediaSourceFactory())
+            .setMediaSourceFactory(app.localMediaSourceFactory())
             .build()
             .apply {
                 setHandleAudioBecomingNoisy(true)
@@ -91,7 +91,7 @@ class PlayerService : MediaSessionService() {
             playbackDao.upsert(
                 ProgressEntity(
                     bookId = ids.first,
-                    chapterId = ids.second,
+                    chapterOrdinal = ids.second,
                     positionMs = positionMs,
                     updatedAt = System.currentTimeMillis(),
                 ),
@@ -109,13 +109,14 @@ class PlayerService : MediaSessionService() {
     companion object {
         private const val SAVE_INTERVAL_MS = 10_000L
 
+        /** mediaId формата "bookId:chapterOrdinal". */
         fun parseMediaId(mediaId: String?): Pair<Int, Int>? {
             if (mediaId == null) return null
             val parts = mediaId.split(":")
             if (parts.size != 2) return null
             val bookId = parts[0].toIntOrNull()
-            val chapterId = parts[1].toIntOrNull()
-            return if (bookId != null && chapterId != null) bookId to chapterId else null
+            val chapterOrdinal = parts[1].toIntOrNull()
+            return if (bookId != null && chapterOrdinal != null) bookId to chapterOrdinal else null
         }
     }
 }
