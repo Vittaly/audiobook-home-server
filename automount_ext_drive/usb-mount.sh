@@ -34,7 +34,7 @@ compute_mount_name() {
     fi
 
     if [[ -n "$uuid" ]]; then
-        printf '%s' "$(printf '%s' "$uuid" | cut -d- -f1 | tr 'A-F' 'a-f')"
+        printf '%s' "$(printf '%s' "$uuid" | tr -d '-' | cut -c1-4 | tr 'A-F' 'a-f')"
         return 0
     fi
 
