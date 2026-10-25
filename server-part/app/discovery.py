@@ -19,6 +19,8 @@ start() и stop() — асинхронные, вызываются из lifespan
   - виртуальные интерфейсы (docker, br-, veth, cni, vEthernet, Hyper-V, ...).
 Приоритет выбора: 192.168.* > 10.* > прочие > 172.16.0.0/12 (Docker/VPN).
 """
+from __future__ import annotations
+
 
 import asyncio
 import ipaddress

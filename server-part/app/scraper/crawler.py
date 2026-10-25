@@ -4,6 +4,8 @@
 Не знает ни про БД, ни про Book, ни про каталог.
 Работает с CrawlState (границы, курсор) и отдаёт страницы по одной.
 """
+from __future__ import annotations
+
 
 import asyncio
 import logging

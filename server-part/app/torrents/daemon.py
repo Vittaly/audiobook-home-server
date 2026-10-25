@@ -37,6 +37,8 @@
   - Дополнительно нужен WebUI\\Enabled=true (без него WebUI
     стартует нестабильно и генерирует временный пароль).
 """
+from __future__ import annotations
+
 
 import base64
 import hashlib

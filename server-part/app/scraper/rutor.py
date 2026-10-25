@@ -6,6 +6,8 @@
   - fetch_torrent_details → детальная страница, поля готовы к применению
   - fetch_file_list     → список файлов
 """
+from __future__ import annotations
+
 
 import logging
 import re

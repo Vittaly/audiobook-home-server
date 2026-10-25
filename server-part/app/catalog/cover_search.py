@@ -12,6 +12,8 @@
 Fantlab подключается отдельно для жанровой фантастики,
 если book.rubrics содержит «фантастика» / «фэнтези».
 """
+from __future__ import annotations
+
 
 import logging
 from dataclasses import dataclass

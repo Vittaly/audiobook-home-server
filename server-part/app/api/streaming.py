@@ -13,6 +13,8 @@
 
 При любом отказе (409, 410) логирует подробную диагностику.
 """
+from __future__ import annotations
+
 
 import logging
 import mimetypes

@@ -22,6 +22,8 @@ _apply_release_update их не перезаписывает.
 (app.catalog.cover_search). Если и там ничего — карточка остаётся
 без обложки, retry_count++.
 """
+from __future__ import annotations
+
 
 import asyncio
 import json

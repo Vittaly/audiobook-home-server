@@ -7,6 +7,8 @@
 Никаких деталей торрент-клиента, файловой системы или БД —
 это всё в catalog.download.
 """
+from __future__ import annotations
+
 
 import logging
 

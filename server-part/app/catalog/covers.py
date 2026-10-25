@@ -10,6 +10,8 @@ CoverService — единственное место, которое:
 Клиент не знает ни про источник обложки, ни про кэш — он всегда
 запрашивает один и тот же URL, а сервер решает, что отдать.
 """
+from __future__ import annotations
+
 
 import logging
 from pathlib import Path

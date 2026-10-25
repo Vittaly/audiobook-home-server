@@ -18,6 +18,8 @@
 status глав и, когда первая становится ready, ставит high на
 следующую незавершённую.
 """
+from __future__ import annotations
+
 
 import logging
 import re

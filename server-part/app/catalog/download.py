@@ -13,6 +13,8 @@
 Клиент торрента (transmission/libtorrent) не упоминается —
 взаимодействие идёт через app.torrents.manager.
 """
+from __future__ import annotations
+
 
 import logging
 import shutil

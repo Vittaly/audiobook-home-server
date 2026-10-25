@@ -9,6 +9,8 @@ book.last_accessed и chapter.last_streamed_at, продлевая TTL.
 HEAD не трогает активность — ExoPlayer дёргает его перед GET,
 не хотим двойной записи в access_log.
 """
+from __future__ import annotations
+
 
 import logging
 

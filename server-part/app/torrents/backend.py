@@ -8,6 +8,8 @@
 Все методы синхронные. Вызывающий код при необходимости оборачивает
 их в asyncio.to_thread.
 """
+from __future__ import annotations
+
 
 from dataclasses import dataclass
 from pathlib import Path

@@ -10,3 +10,8 @@ mutagen
 pillow
 zeroconf
 qbittorrent-api
+
+# Runtime support for PEP 604 unions (`X | None`) in Pydantic/FastAPI
+# when running on Python < 3.10 (Pydantic uses it to resolve stringized
+# annotations despite `from __future__ import annotations`).
+eval_type_backport; python_version < "3.10"

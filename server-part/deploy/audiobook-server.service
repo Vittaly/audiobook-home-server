@@ -2,15 +2,21 @@
 # Audiobook Home Server — systemd unit (Linux, headless)
 # ============================================================
 #
-# УСТАНОВКА:
-#   sudo cp deploy/audiobook-server.service /etc/systemd/system/
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now audiobook-server
+# ЭТО ШАБЛОН. Не копируйте его в /etc/systemd/system вручную:
+# пути __USER__ / __HOME__ / __WORKDIR__ / __PYTHON__ подставляет
+# ./manage.sh install (по текущему пользователю и venv проекта).
 #
-# НАСТРОЙКА:
-#   - User/Group        — пользователь, от которого работает сервер.
-#   - WorkingDirectory  — каталог, где лежат main.py и .env.
-#   - ExecStart         — путь к python3 (или venv) + main.py.
+# УСТАНОВКА:
+#   ./manage.sh install        # отрендерит шаблон и положит в /etc/systemd/system
+#   ./manage.sh auto           # install + enable --now (автозапуск)
+#
+# Ручная установка (если нужно):
+#   sed -e "s|__USER__|$USER|g" \
+#       -e "s|__HOME__|$HOME|g" \
+#       -e "s|__WORKDIR__|$(pwd)|g" \
+#       -e "s|__PYTHON__|$(pwd)/.venv/bin/python3|g" \
+#       deploy/audiobook-server.service | sudo tee /etc/systemd/system/audiobook-server.service >/dev/null
+#   sudo systemctl daemon-reload
 #
 # ВАЖНО: .env сервер читает сам из WorkingDirectory (pydantic-settings),
 # поэтому EnvironmentFile не нужен — он конфликтует с inline-комментариями
@@ -27,16 +33,14 @@ After=network.target network-online.target
 
 [Service]
 Type=simple
-User=vit
-Group=vit
+User=__USER__
+Group=__USER__
 
 # каталог с main.py и .env
-WorkingDirectory=/home/vit/audiobook-home-server/server-part
+WorkingDirectory=__WORKDIR__
 
-# Путь к Python (виртуальное окружение или системный).
-# По умолчанию — venv в корне проекта: /home/vit/audiobook-home-server/.venv/
-# Если venv не используется — замените на /usr/bin/python3
-ExecStart=/home/vit/audiobook-home-server/.venv/bin/python3 main.py
+# Путь к Python (venv проекта). Если venv нет — подставьте /usr/bin/python3
+ExecStart=__PYTHON__ main.py
 
 Restart=always
 RestartSec=10

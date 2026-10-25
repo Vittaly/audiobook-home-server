@@ -14,6 +14,8 @@
 Обложки лежат по URL без расширения:
   https://cdn.litres.ru/pub/c/cover_415/{art_id}
 """
+from __future__ import annotations
+
 
 import logging
 from urllib.parse import quote

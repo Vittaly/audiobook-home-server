@@ -19,6 +19,8 @@
   Фаза 2 (есть готовая глава) — качается вся раздача, high на первую
   незагруженную главу, остальные аудио и обложки в normal.
 """
+from __future__ import annotations
+
 
 import asyncio
 import logging

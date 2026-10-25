@@ -31,6 +31,8 @@
   сразу увидеть проблему с аутентификацией, а не ловить 403 разбросанно
   по всем запросам.
 """
+from __future__ import annotations
+
 
 import hashlib
 import logging

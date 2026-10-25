@@ -4,6 +4,8 @@ HTTP-специфичные схемы.
 Не описывают сущности — они в app/schemas/.
 Здесь только тела запросов и параметры команд.
 """
+from __future__ import annotations
+
 
 from pydantic import BaseModel, Field
 
