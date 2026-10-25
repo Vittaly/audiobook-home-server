@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 from contextlib import contextmanager
 
 from sqlalchemy import create_engine, event as sa_event
@@ -28,13 +29,24 @@ engine = create_engine(
 @sa_event.listens_for(engine, "connect")
 def _set_sqlite_pragma(dbapi_conn, _):
     cur = dbapi_conn.cursor()
-    cur.execute("PRAGMA foreign_keys=ON")
-    cur.execute("PRAGMA journal_mode=WAL")
-    cur.execute("PRAGMA synchronous=NORMAL")
-    # По умолчанию в Python sqlite3 busy_timeout = 5с: если фоновый
-    # поллер/ingest в этот момент держит write-лок, запрос из API падает
-    # с "database is locked". Ждём лок до 30с вместо падения.
+    # busy_timeout ставим ПЕРВЫМ, чтобы все последующие PRAGMA и запросы
+    # ждали снятия блокировки, а не падали мгновенно с "database is locked".
     cur.execute("PRAGMA busy_timeout=30000")
+    cur.execute("PRAGMA foreign_keys=ON")
+    try:
+        # Смена journal_mode требует ЭКСКЛЮЗИВНОЙ блокировки БД. Если её
+        # держит другой процесс — это ВСЕГДА второй запущенный экземпляр
+        # сервера (см. app/singleton.py), а не проблема ФС. Даём явную
+        # диагностику вместо невнятного "database is locked".
+        cur.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError as exc:
+        raise RuntimeError(
+            "Не удалось включить WAL: БД занята другим процессом. "
+            "Проверьте, не запущен ли ВТОРОЙ экземпляр сервера "
+            "(ps aux | grep main.py; systemctl status audiobook-server). "
+            f"Исходная ошибка: {exc}"
+        ) from exc
+    cur.execute("PRAGMA synchronous=NORMAL")
     cur.close()
 
 

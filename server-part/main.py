@@ -11,6 +11,7 @@ import uvicorn
 from app.api.server import create_app
 from app.config import settings
 from app.logging_setup import setup_logging
+from app.singleton import AlreadyRunningError, acquire_single_instance
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +33,19 @@ async def main() -> None:
     log.info("=== audiobook-server запускается ===")
     log.info(">>> main: __file__=%s", __file__)
     log.info(">>> main: data_dir=%s", settings.data_dir)
+
+    # ---------- защита от второго экземпляра ----------
+    # SQLite-файл (тем более VFS "unix-excl") допускает ТОЛЬКО один
+    # процесс. Второй экземпляр (systemd + nohup, два `./manage.sh start`)
+    # падал с "database is locked" уже на `PRAGMA journal_mode=WAL`,
+    # причём после 30-секундного ожидания. Ловим это здесь — сразу и с
+    # понятным сообщением, до любых операций с БД. Используем существующий
+    # PID-файл data_dir/server.pid (тот же, что пишет manage.sh).
+    try:
+        acquire_single_instance()
+    except AlreadyRunningError as exc:
+        log.critical(">>> main: запуск отменён — %s", exc)
+        sys.exit(3)
 
     app = create_app()
     config = uvicorn.Config(

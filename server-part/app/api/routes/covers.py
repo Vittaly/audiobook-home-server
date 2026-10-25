@@ -91,8 +91,14 @@ def _serve_temp_release_cover(release: Release, request: Request) -> Response:
     Добавляет X-Cover-Temp: true и Cache-Control: no-cache, чтобы
     клиент перезапрашивал, пока своя обложка книги не получена.
     """
+    # Обложки раздачи ещё нет в кэше — сразу заглушка с признаком
+    # временного состояния. Важно проверить путь ДО abs_cover():
+    # layout.abs_cover(None) бросает TypeError (PosixPath / NoneType).
+    if not release.cover_cache_path:
+        return _placeholder_response(headers=_TEMP_HEADERS, method=request.method)
+
     abs_path = layout.abs_cover(release.cover_cache_path)
-    if release.cover_cache_path and abs_path.exists():
+    if abs_path.exists():
         etag = f'"{release.cover_sha256}"' if release.cover_sha256 else None
 
         if etag and request.headers.get("if-none-match") == etag:

@@ -111,6 +111,23 @@ do_start_systemd() {
 }
 
 do_start_bg() {
+    # Защита от ДВУХ экземпляров на одной БД. Если сервис уже установлен в
+    # systemd и включён в автозапуск — не поднимаем nohup-копию (два
+    # процесса на один SQLite VFS "unix-excl" дают "database is locked"
+    # уже на PRAGMA journal_mode=WAL).
+    if systemd_unit_installed \
+       && systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+        if systemd_manageable; then
+            echo ">> $SERVICE_NAME уже в systemd (enabled) — запускаю через systemd"
+            do_start_systemd
+            return 0
+        fi
+        echo ">> !!! $SERVICE_NAME управляется systemd и включён в автозапуск."
+        echo ">>     Запуск nohup-копии создал бы ВТОРОЙ процесс на той же"
+        echo ">>     SQLite-БД → \"database is locked\". Запустите через systemd:"
+        echo ">>         sudo systemctl start $SERVICE_NAME"
+        return 1
+    fi
     if [[ -f "$(pid_file)" ]] && kill -0 "$(cat "$(pid_file)")" 2>/dev/null; then
         echo ">> сервер уже запущен, PID=$(cat "$(pid_file)")"
         return 0
