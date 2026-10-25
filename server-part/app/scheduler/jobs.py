@@ -11,6 +11,7 @@
 и полный трейс при ошибке. Исключение в задаче не убивает планировщик.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -44,6 +45,15 @@ def _logged(name):
                 log.info(">>> task %s: ГОТОВО (%s) за %.1f сек",
                          name, result, dt)
                 return result
+            except asyncio.CancelledError:
+                # Нормальная отмена: остановка планировщика/сервера или
+                # таймаут внутри задачи (asyncio.wait_for в sync_catalog).
+                # CancelledError — это BaseException, обычный `except Exception`
+                # его не ловит, и APScheduler логирует трейс как ошибку.
+                # Проглатываем: отмена задачи — не сбой.
+                dt = (datetime.now(timezone.utc) - t0).total_seconds()
+                log.info(">>> task %s: ОТМЕНЕНА за %.1f сек", name, dt)
+                return None
             except Exception:
                 dt = (datetime.now(timezone.utc) - t0).total_seconds()
                 log.exception(">>> task %s: ОШИБКА за %.1f сек", name, dt)

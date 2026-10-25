@@ -7,6 +7,8 @@
 Никаких деталей торрент-клиента, файловой системы или БД —
 это всё в catalog.download.
 """
+from __future__ import annotations
+
 
 import logging
 
@@ -54,6 +56,36 @@ async def start_download(
     _raise_for(result)
 
     return {
+        "release_id": result.release_id,
+        "book_id": result.book_id,
+        "client_id": result.client_id,
+        "status": result.status,
+        "save_path": result.save_path,
+        "message": "download started",
+    }
+
+
+# ============================================================
+# POST /releases/{id}/download
+# ============================================================
+
+@router.post("/releases/{release_id}/download", status_code=202)
+async def start_release_download(
+    release_id: int,
+    book_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """Запускает загрузку всей раздачи.
+
+    Книг до старта загрузки может не быть (сервер не создаёт книгу-
+    заглушку) — торрент стартует на уровне карточки раздачи. Клиент
+    поллит каталог и берёт первую книгу по порядку по факту появления.
+    """
+    result = await download_domain.start_release(db, release_id, book_id=book_id)
+    _raise_for(result)
+
+    return {
+        "release_id": result.release_id,
         "book_id": result.book_id,
         "client_id": result.client_id,
         "status": result.status,

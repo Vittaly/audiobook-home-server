@@ -13,6 +13,8 @@
 
 При любом отказе (409, 410) логирует подробную диагностику.
 """
+from __future__ import annotations
+
 
 import logging
 import mimetypes
@@ -20,6 +22,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 from fastapi.responses import FileResponse, Response
+from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db.models import Chapter, ChapterStatus
@@ -82,6 +85,56 @@ def serve_chapter(chapter: Chapter, range_header: str | None) -> Response:
         headers=headers,
         filename=abs_path.name,
     )
+
+
+# ============================================================
+# СИНХРОННАЯ ПЕРЕПРОВЕРКА СТАТУСА
+# ============================================================
+
+def sync_chapter_status(chapter: Chapter, db: Session) -> Chapter:
+    """
+    Синхронно актуализирует раздачу по запросу главы.
+
+    Вызывается из stream-роута ДО serve_chapter, когда статус в БД ещё не
+    'ready'. Поллер обновляет статусы раз в несколько секунд, и плеер (или
+    очередь докачки) может стучаться в эндпоинт раньше, чем поллер заметит
+    завершение файла. Здесь мы не ждём следующего прохода поллера, а сразу
+    выполняем ровно те же действия, что и проход поллера, — вызываем общую
+    актуализацию раздачи actualize_release() (догон статусов глав +
+    приведение приоритетов всей раздачи к целевой схеме).
+
+    Возвращает (возможно, обновлённый) chapter.
+    """
+    if chapter.status == ChapterStatus.READY.value:
+        return chapter
+
+    release = chapter.release
+    if release is None or not release.torrent_hash:
+        return chapter
+
+    try:
+        from app.torrents.poller import actualize_release
+
+        was_status = chapter.status
+        changed = actualize_release(db, release.torrent_hash, release)
+
+        if changed:
+            db.commit()
+            db.refresh(chapter)
+
+        if chapter.status != was_status:
+            log.info(
+                "stream: chapter=%s актуализирован: %s → %s, book=%s",
+                chapter.id, was_status, chapter.status, chapter.book_id,
+            )
+    except Exception:
+        log.exception(
+            "stream: ошибка актуализации chapter=%s, "
+            "оставляем статус %s",
+            chapter.id, chapter.status,
+        )
+
+    return chapter
 
 
 # ============================================================

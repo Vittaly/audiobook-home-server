@@ -62,6 +62,13 @@ class Book(Base):
     cover_retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # признак временной обложки: показываем обложку раздачи, пока не получена своя
     cover_is_temp:     Mapped[bool] = mapped_column(Integer, default=False, nullable=False)
+    # признак «книга ещё не полностью определена»: книга-заглушка, созданная
+    # при первом появлении раздачи до скана структуры торрента. Снимается
+    # после получения глав/описания (ingest_release), когда данные книги
+    # финализируются. Клиент пока видит флаг — поллит книгу и не считает
+    # её готовой, а при снятии признака перечитывает.
+    is_provisional:    Mapped[bool] = mapped_column(
+        Integer, default=False, nullable=False, index=True)
     # rel-путь картинки тома внутри торрента (из структуры), если она есть.
     # Позволяет докачать файл после того, как он появился на диске.
     cover_path_hint:   Mapped[str | None] = mapped_column(Text)

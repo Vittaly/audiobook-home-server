@@ -23,6 +23,18 @@ class Settings(BaseSettings):
     # Относительный считается от PROJECT_ROOT, а не от CWD.
     DATA_DIR: str = "data"
 
+    # SQLite-VFS. По умолчанию "unix-excl":
+    # SQLite держит ОДИН блокирующий файл-дескриптор на саму БД и хранит
+    # WAL-индекс/блокировки В ПАМЯТИ процесса, НЕ создавая на диске
+    # -wal/-shm файлы и не выполняя байтовые POSIX-локи. Это единственный
+    # режим, работающий на сетевой ФС (CIFS/SMB): обычный VFS "unix"
+    # падает там с "database is locked", т.к. CIFS не поддерживает
+    # POSIX-локи, а вынести -shm на другую ФС нельзя (SQLite всегда
+    # кладёт его рядом с файлом БД).
+    # Значения: "unix-excl" | "unix" | "unix-dotfile" | "unix-none" | "".
+    # "" — системный VFS по умолчанию (обычный "unix").
+    SQLITE_VFS: str = "unix-excl"
+
     # --- логи ---
     LOG_LEVEL: str = "DEBUG"
 
@@ -58,7 +70,7 @@ class Settings(BaseSettings):
 
     # qBittorrent
     QBITTORRENT_HOST: str = "127.0.0.1"
-    QBITTORRENT_PORT: int = 8080
+    QBITTORRENT_PORT: int = 8089
     QBITTORRENT_USER: str = "admin"
     QBITTORRENT_PASSWORD: str = "adminadmin"
 
@@ -91,12 +103,16 @@ class Settings(BaseSettings):
 
     # --- пути ---
 
-    @property
-    def data_dir(self) -> Path:
-        p = Path(self.DATA_DIR)
+    @staticmethod
+    def _resolve(raw: str) -> Path:
+        p = Path(raw)
         if not p.is_absolute():
             p = PROJECT_ROOT / p
         return p.resolve()
+
+    @property
+    def data_dir(self) -> Path:
+        return self._resolve(self.DATA_DIR)
 
     @property
     def db_file(self) -> Path:
@@ -120,7 +136,12 @@ class Settings(BaseSettings):
 
     @property
     def db_url(self) -> str:
-        return f"sqlite:///{self.db_file.as_posix()}"
+        # file: URI + vfs=... → SQLAlchemy/sqlite3 открывают БД через
+        # выбранный VFS (см. SQLITE_VFS). Без VFS — системный по умолчанию.
+        path = self.db_file.as_posix()
+        if self.SQLITE_VFS:
+            return f"sqlite:///file:{path}?vfs={self.SQLITE_VFS}&mode=rwc&uri=true"
+        return f"sqlite:///{path}"
 
     def ensure_dirs(self) -> None:
         for d in (self.data_dir, self.downloads_dir,

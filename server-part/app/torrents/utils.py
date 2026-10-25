@@ -7,6 +7,8 @@
 
 Единая точка правды: имя файла → порядок → первый аудио.
 """
+from __future__ import annotations
+
 
 import re
 from pathlib import Path

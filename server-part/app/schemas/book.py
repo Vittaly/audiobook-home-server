@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 
 from pydantic import BaseModel
@@ -25,6 +27,10 @@ class BookOut(BaseModel):
     chapters_ready: int = 0
     total_duration_sec: int | None = None
     size_bytes: int | None = None
+
+    # признак «книга ещё не полностью определена»: данные книги (главы,
+    # описание) могут измениться; снимается после получения глав/описания.
+    is_provisional: bool = False
 
     cover_url: str | None = None
     cover_is_temp: bool = False

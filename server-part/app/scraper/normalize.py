@@ -5,6 +5,8 @@
 detect_content_type возвращает строки ('single'|'series'|'collection'),
 чтобы scraper не зависел от enum-ов из app.db.models.
 """
+from __future__ import annotations
+
 
 import re
 

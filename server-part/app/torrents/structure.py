@@ -13,6 +13,8 @@
                     «Название серии. Том N» (иначе None — серия берётся
                     из карточки раздачи).
 """
+from __future__ import annotations
+
 
 import logging
 import re

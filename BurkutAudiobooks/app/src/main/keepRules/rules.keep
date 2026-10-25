@@ -10,3 +10,23 @@
 #-keepclassmembers class fqcn.of.javascript.interface.for.webview {
 #   public *;
 #}
+
+# --- Moshi codegen (R8) ---
+# Сгенерированные Moshi-адаптеры находятся по рефлексии (Class.forName).
+# Несмотря на явную регистрацию в ApiProvider, держим их и DTO, чтобы
+# release-сборка с обфускацией никогда не потеряла адаптеры.
+-keep class ru.burkut.audiobooks.data.api.**JsonAdapter {
+    public <init>(com.squareup.moshi.Moshi);
+}
+
+# DTO, которые сериализуются сгенерированными адаптерами.
+-keepnames class ru.burkut.audiobooks.data.api.* {
+    <init>(...);
+    *;
+}
+
+# Имена полей enum'ов используются EnumJsonAdapter.
+-keepclassmembers,allowoptimization class ru.burkut.audiobooks.data.api.** {
+    **[] values();
+    <fields>;
+}

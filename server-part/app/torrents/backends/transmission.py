@@ -18,6 +18,8 @@
     попадают в клиент мгновенно, независимо от DHT и трекеров.
   - add_magnet — fallback, если .torrent скачать не удалось.
 """
+from __future__ import annotations
+
 
 import logging
 from pathlib import Path

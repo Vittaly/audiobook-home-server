@@ -11,6 +11,8 @@ Middleware для логирования HTTP-запросов.
 
 Пропускает шумные пути (/health, /docs, /openapi.json, /redoc).
 """
+from __future__ import annotations
+
 
 import logging
 import time

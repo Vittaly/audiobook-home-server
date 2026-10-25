@@ -15,71 +15,78 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
+import ru.burkut.audiobooks.data.db.ReleaseEntity
 import ru.burkut.audiobooks.ui.appInstance
-import ru.burkut.audiobooks.ui.components.BookListItem
+import ru.burkut.audiobooks.ui.theme.serverOnlineColor
+import ru.burkut.audiobooks.ui.util.formatReleaseDate
+import ru.burkut.audiobooks.ui.util.formatSeconds
 import ru.burkut.audiobooks.ui.viewModelFactoryOf
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CatalogScreen(
-    onOpenBook: (Int) -> Unit,
+    onOpenRelease: (Int) -> Unit,
     onOpenSettings: () -> Unit,
     vm: CatalogViewModel = viewModel(
         factory = viewModelFactoryOf { CatalogViewModel(appInstance()) }
     ),
 ) {
-    val books by vm.books.collectAsState()
-    val rubrics by vm.rubrics.collectAsState()
-    val activeRubric by vm.rubric.collectAsState()
+    val state by vm.state.collectAsState()
     val isLoading by vm.isLoading.collectAsState()
-    val error by vm.error.collectAsState()
-    val query by vm.query.collectAsState()
-
-    val listState = rememberLazyListState()
-
-    LaunchedEffect(listState) {
-        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
-            .collect { lastVisible ->
-                if (lastVisible != null && lastVisible >= books.size - 3) {
-                    vm.loadMore()
-                }
-            }
-    }
+    val isServerOnline by vm.isServerOnline.collectAsState()
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Аудиокниги") },
+                title = { Text("Раздачи") },
                 actions = {
+                    // Индикатор доступа к серверу без надписи: яркий зелёный круг,
+                    // когда сервер доступен; в автономном режиме — ничего.
+                    if (isServerOnline) {
+                        Surface(
+                            shape = CircleShape,
+                            color = serverOnlineColor(),
+                            modifier = Modifier
+                                .padding(end = 8.dp)
+                                .size(10.dp),
+                        ) {}
+                    }
                     IconButton(onClick = vm::refresh) {
                         Icon(Icons.Default.Refresh, contentDescription = "Обновить")
                     }
                     IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Default.Settings, contentDescription = "Настройки сервера")
+                        Icon(Icons.Default.Settings, contentDescription = "Сервер")
                     }
                 },
             )
@@ -90,39 +97,40 @@ fun CatalogScreen(
                 .padding(padding)
                 .fillMaxSize(),
         ) {
-            OutlinedTextField(
-                value = query,
-                onValueChange = { vm.query.value = it },
-                label = { Text("Поиск по названию и автору") },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                singleLine = true,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-            )
-
-            if (rubrics.isNotEmpty()) {
-                LazyRow(
+            // Баннер оффлайна: каталог из кэша.
+            if (!isServerOnline) {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
                     modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 12.dp),
                 ) {
-                    items(rubrics, key = { it }) { r ->
-                        FilterChip(
-                            selected = activeRubric == r,
-                            onClick = { vm.selectRubric(r) },
-                            label = { Text(r) },
-                            modifier = Modifier.padding(end = 8.dp),
-                        )
-                    }
+                    Text(
+                        "Сервер не доступен — показан кэш каталога. " +
+                            "Слушать можно через «Скачать и слушать» оффлайн.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
                 }
-                Spacer(Modifier.height(4.dp))
             }
 
-            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                items(books, key = { it.id }) { book ->
-                    BookListItem(
-                        book = book,
-                        onClick = { onOpenBook(book.id) },
+            CatalogFiltersBar(
+                filters = state.filters,
+                availableRubrics = state.availableRubrics,
+                availableSeries = state.availableSeries,
+                onQueryChange = vm::setQuery,
+                onRubricChange = vm::setRubric,
+                onSeriesChange = vm::setSeries,
+                onReset = vm::resetFilters,
+            )
+
+            val hasAnyReleases = state.totalCount > 0
+            val shown = state.releases
+
+            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                items(shown, key = { it.id }) { release ->
+                    ReleaseCard(
+                        release = release,
+                        onClick = { onOpenRelease(release.id) },
                     )
                 }
                 if (isLoading) {
@@ -135,29 +143,182 @@ fun CatalogScreen(
                         }
                     }
                 }
-                if (error != null && books.isEmpty()) {
-                    item {
-                        Column(
-                            modifier = Modifier.fillMaxWidth().padding(24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            Text(error!!, color = androidx.compose.material3.MaterialTheme.colorScheme.error)
-                            Spacer(Modifier.height(8.dp))
-                            TextButton(onClick = vm::refresh) {
-                                Text("Повторить")
-                            }
-                        }
-                    }
-                }
-                if (books.isEmpty() && !isLoading && error == null) {
+                if (shown.isEmpty() && !isLoading) {
                     item {
                         Box(
                             modifier = Modifier.fillMaxWidth().padding(32.dp),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Text("Каталог пуст")
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                if (hasAnyReleases) {
+                                    // Каталог не пуст — отфильтровано всё.
+                                    Text("Ничего не найдено")
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(
+                                        "Измените поиск или сбросьте фильтры",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    if (state.filters.isActive) {
+                                        Spacer(Modifier.height(8.dp))
+                                        TextButton(onClick = vm::resetFilters) {
+                                            Text("Сбросить фильтры")
+                                        }
+                                    }
+                                } else {
+                                    Text("Каталог пуст")
+                                    Spacer(Modifier.height(8.dp))
+                                    TextButton(onClick = vm::refresh) {
+                                        Text("Обновить")
+                                    }
+                                }
+                            }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CatalogFiltersBar(
+    filters: CatalogFilters,
+    availableRubrics: List<String>,
+    availableSeries: List<SeriesOption>,
+    onQueryChange: (String) -> Unit,
+    onRubricChange: (String?) -> Unit,
+    onSeriesChange: (Int?) -> Unit,
+    onReset: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
+        // Поиск по названию/автору.
+        OutlinedTextField(
+            value = filters.query,
+            onValueChange = onQueryChange,
+            singleLine = true,
+            label = { Text("Поиск по названию или автору") },
+            leadingIcon = {
+                Icon(Icons.Default.Search, contentDescription = null)
+            },
+            trailingIcon = {
+                if (filters.query.isNotEmpty()) {
+                    IconButton(onClick = { onQueryChange("") }) {
+                        Icon(Icons.Default.Clear, contentDescription = "Очистить")
+                    }
+                }
+            },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp),
+        )
+
+        // Фильтр по рубрикам (категориям).
+        if (availableRubrics.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Категории",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(vertical = 4.dp),
+            ) {
+                items(availableRubrics, key = { it }) { rubric ->
+                    FilterChip(
+                        selected = filters.rubric == rubric,
+                        onClick = { onRubricChange(rubric) },
+                        label = { Text(rubric) },
+                    )
+                }
+            }
+        }
+
+        // Фильтр по сериям (доступны для раздач, чьи тома уже в кэше).
+        if (availableSeries.isNotEmpty()) {
+            Text(
+                "Серии",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(vertical = 4.dp),
+            ) {
+                items(availableSeries, key = { it.id }) { series ->
+                    FilterChip(
+                        selected = filters.seriesId == series.id,
+                        onClick = { onSeriesChange(series.id) },
+                        label = { Text(series.title) },
+                    )
+                }
+            }
+        }
+
+        if (filters.isActive) {
+            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                TextButton(onClick = onReset) {
+                    Text("Сбросить фильтры")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReleaseCard(
+    release: ReleaseEntity,
+    onClick: () -> Unit,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .clickable(onClick = onClick),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(12.dp),
+        ) {
+            AsyncImage(
+                model = release.coverUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.size(72.dp),
+            )
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 12.dp),
+            ) {
+                Text(
+                    release.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 2,
+                )
+                val meta = buildList {
+                    release.author?.let { add(it) }
+                    // Дата релиза с трекера — основная дата каталога.
+                    formatReleaseDate(release.releasedAt)?.let { add(it) }
+                    // Год написания/издания книги — дополнительная информация.
+                    release.year?.let { add("$it г.") }
+                    release.totalDurationSec?.let { add(formatSeconds(it)) }
+                    add("Томов: ${release.booksCount}")
+                }.joinToString(" · ")
+                if (meta.isNotEmpty()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        meta,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }

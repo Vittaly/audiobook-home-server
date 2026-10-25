@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 
 from pydantic import BaseModel
@@ -19,6 +21,8 @@ class ReleaseBookOut(BaseModel):
     chapters_ready: int = 0
     total_duration_sec: int | None = None
     size_bytes: int | None = None
+    # признак «книга ещё не полностью определена»: данные книги могут измениться.
+    is_provisional: bool = False
     cover_url: str | None = None
     cover_is_temp: bool = False
     last_accessed: datetime | None = None
@@ -49,7 +53,10 @@ class ReleaseOut(BaseModel):
     total_duration_sec: int | None = None
     size_bytes: int | None = None
     cover_url: str | None = None
+    # added_at — время индексации на сервере; released_at — дата создания
+    # раздачи на трекере (сортировка «сначала новые» идёт по ней).
     added_at: datetime
+    released_at: datetime
     downloaded_at: datetime | None = None
     last_accessed: datetime | None = None
 

@@ -4,6 +4,8 @@
 Пока заглушка: методы возвращают безопасные значения и логируют warning.
 Включить: TORRENT_BACKEND=libtorrent в .env + установить python-libtorrent.
 """
+from __future__ import annotations
+
 
 import logging
 from pathlib import Path

@@ -13,6 +13,8 @@ Chapter привязан к книге (book_id) и раздаче (release_id).
 Также здесь живёт update_chapter_from_alert — обновление главы по данным
 торрент-клиента (backlog alert'ов).
 """
+from __future__ import annotations
+
 
 import logging
 from datetime import datetime

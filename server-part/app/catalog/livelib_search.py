@@ -8,6 +8,8 @@
 Ограничение: только для классики и переводных изданий,
 современные аудиокниги плохо представлены.
 """
+from __future__ import annotations
+
 
 import logging
 from urllib.parse import quote, urljoin

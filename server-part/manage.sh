@@ -77,6 +77,32 @@ systemd_active() {
     is_systemd && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null
 }
 
+# Юнит установлен в /etc/systemd/system?
+systemd_unit_installed() {
+    [[ -f "$SERVICE_FILE" ]]
+}
+
+# Юнит установлен и настроен ИМЕННО на этого пользователя/эти пути?
+# (защита от шаблона с чужим User=vit и /home/vit/... , из-за которого
+#  systemd падает с status=217/USER и уходит в рестарт-петлю)
+systemd_unit_matches_host() {
+    [[ -f "$SERVICE_FILE" ]] || return 1
+    local unit_user unit_exec unit_wd
+    unit_user="$(grep -E '^User=' "$SERVICE_FILE" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
+    unit_exec="$(grep -E '^ExecStart=' "$SERVICE_FILE" 2>/dev/null | head -n1 | cut -d= -f2- | awk '{print $1}' || true)"
+    unit_wd="$(grep -E '^WorkingDirectory=' "$SERVICE_FILE" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
+    [[ "$unit_user" == "$(id -un)" ]] || return 1
+    [[ -n "$unit_wd" && -d "$unit_wd" ]] || return 1
+    [[ -n "$unit_exec" && -x "$unit_exec" ]] || return 1
+    return 0
+}
+
+# Можем ли управлять сервисом через systemd без запроса пароля?
+systemd_manageable() {
+    [[ "${EUID:-$(id -u)}" -eq 0 ]] && return 0
+    sudo -n true 2>/dev/null
+}
+
 # --- действия -----------------------------------------------
 do_start_systemd() {
     echo ">> systemd: запуск $SERVICE_NAME"
@@ -85,6 +111,23 @@ do_start_systemd() {
 }
 
 do_start_bg() {
+    # Защита от ДВУХ экземпляров на одной БД. Если сервис уже установлен в
+    # systemd и включён в автозапуск — не поднимаем nohup-копию (два
+    # процесса на один SQLite VFS "unix-excl" дают "database is locked"
+    # уже на PRAGMA journal_mode=WAL).
+    if systemd_unit_installed \
+       && systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+        if systemd_manageable; then
+            echo ">> $SERVICE_NAME уже в systemd (enabled) — запускаю через systemd"
+            do_start_systemd
+            return 0
+        fi
+        echo ">> !!! $SERVICE_NAME управляется systemd и включён в автозапуск."
+        echo ">>     Запуск nohup-копии создал бы ВТОРОЙ процесс на той же"
+        echo ">>     SQLite-БД → \"database is locked\". Запустите через systemd:"
+        echo ">>         sudo systemctl start $SERVICE_NAME"
+        return 1
+    fi
     if [[ -f "$(pid_file)" ]] && kill -0 "$(cat "$(pid_file)")" 2>/dev/null; then
         echo ">> сервер уже запущен, PID=$(cat "$(pid_file)")"
         return 0
@@ -148,14 +191,37 @@ do_status_bg() {
     fi
 }
 
-do_install() {
+# Рендерит шаблон юнита под текущего пользователя и пути проекта.
+# Аргумент (необязательный) — абсолютный путь к python.
+render_unit() {
     local src="$SCRIPT_DIR/deploy/${SERVICE_NAME}.service"
+    local py="${1:-$PYTHON}"
     if [[ ! -f "$src" ]]; then
         echo ">> ОШИБКА: не найден $src" >&2
         exit 1
     fi
-    echo ">> установка $SERVICE_FILE из $src"
-    sudo cp "$src" "$SERVICE_FILE"
+    sed -e "s|__USER__|$(id -un)|g" \
+        -e "s|__HOME__|${HOME:-$SCRIPT_DIR}|g" \
+        -e "s|__WORKDIR__|$SCRIPT_DIR|g" \
+        -e "s|__PYTHON__|$py|g" \
+        "$src"
+}
+
+do_install() {
+    # systemd требует абсолютный путь в ExecStart
+    local py="$PYTHON"
+    if [[ "$py" != /* ]]; then
+        py="$(command -v "$py" 2>/dev/null || true)"
+    fi
+    if [[ -z "$py" || ! -x "$py" ]]; then
+        echo ">> ОШИБКА: не найден исполняемый Python (venv: $SCRIPT_DIR/.venv)" >&2
+        exit 1
+    fi
+    echo ">> установка $SERVICE_FILE"
+    echo ">>   User=$(id -un)"
+    echo ">>   WorkingDirectory=$SCRIPT_DIR"
+    echo ">>   ExecStart=$py main.py"
+    render_unit "$py" | sudo tee "$SERVICE_FILE" >/dev/null
     sudo systemctl daemon-reload
     echo ">> готово. Дальше: ./manage.sh auto  (включить автозапуск)"
 }
@@ -167,29 +233,54 @@ do_auto() {
 }
 
 # --- диспетчер ----------------------------------------------
+# Предупреждает, если systemd-юнит есть, но бесполезен/вреден на этой машине.
+warn_broken_unit() {
+    systemd_unit_installed || return 0
+    systemd_unit_matches_host && return 0
+    echo ">> !!! systemd-юнит $SERVICE_FILE настроен на другого пользователя/пути"
+    echo ">>     (в нём User=$(grep -E '^User=' "$SERVICE_FILE" | head -n1 | cut -d= -f2- || echo '?'), а вы $(id -un)) —"
+    echo ">>     systemd падает с status=217/USER и уходит в рестарт-петлю."
+    echo ">>     Исправьте:  sudo systemctl disable --now $SERVICE_NAME"
+    echo ">>                 ./manage.sh install   (переустановит юнит под текущего пользователя)"
+}
+
 case "${1:-}" in
     start)
         if systemd_active; then
             echo ">> сервер уже активен в systemd"
-        elif is_systemd; then
+        elif is_systemd && systemd_unit_matches_host && systemd_manageable; then
             do_start_systemd
         else
+            if is_systemd; then
+                warn_broken_unit
+                if systemd_unit_matches_host && ! systemd_manageable; then
+                    echo ">> нет доступа к systemd без пароля sudo — запускаю в фоне."
+                fi
+            fi
             do_start_bg
         fi
         ;;
     stop)
         if systemd_active; then
             do_stop_systemd
-        else
-            do_stop_bg
         fi
+        do_stop_bg
         ;;
     restart)
         if systemd_active; then
             do_stop_systemd
-            do_start_systemd
         else
             do_stop_bg
+        fi
+        if is_systemd && systemd_unit_matches_host && systemd_manageable; then
+            do_start_systemd
+        else
+            if is_systemd; then
+                warn_broken_unit
+                if systemd_unit_matches_host && ! systemd_manageable; then
+                    echo ">> нет доступа к systemd без пароля sudo — запускаю в фоне."
+                fi
+            fi
             do_start_bg
         fi
         ;;
@@ -197,12 +288,20 @@ case "${1:-}" in
         if systemd_active; then
             echo ">> systemd: сервис активен"
             systemctl status --no-pager "$SERVICE_NAME" | head -n 12
-        elif is_systemd; then
-            do_status_bg
-            echo ">> (systemd-сервис $SERVICE_NAME не установлен/не активен)"
-            systemctl is-enabled "$SERVICE_NAME" 2>/dev/null || true
         else
             do_status_bg
+            if is_systemd; then
+                if systemd_unit_installed; then
+                    if systemd_unit_matches_host; then
+                        echo ">> (systemd-сервис $SERVICE_NAME установлен и корректен, но не активен)"
+                    else
+                        echo ">> (systemd-сервис $SERVICE_NAME установлен, НО настроен на другого пользователя — см. ./manage.sh install)"
+                    fi
+                    systemctl is-enabled "$SERVICE_NAME" 2>/dev/null || true
+                else
+                    echo ">> (systemd-сервис $SERVICE_NAME не установлен)"
+                fi
+            fi
         fi
         ;;
     logs)
