@@ -9,8 +9,8 @@ from app.catalog import service
 from app.db.models import Book, Release
 from app.db.session import get_db
 from app.schemas import (
-    BookDetailOut, BookOut, ListResponse,
-    ReleaseBookDetailOut, ReleaseDetailOut, ReleaseOut,
+    BookDetailOut, BookOut, ChapterOut, ListResponse,
+    ReleaseBookDetailOut, ReleaseDetailOut, ReleaseOut, SeriesRef,
 )
 
 log = logging.getLogger(__name__)
@@ -39,28 +39,28 @@ def _rubrics_of(release: Release) -> list[str]:
     return [rr.rubric.title for rr in release.rubrics]
 
 
-def _series_ref(book: Book) -> dict | None:
+def _series_ref(book: Book) -> SeriesRef | None:
     if book.series:
-        return {
-            "id": book.series.id,
-            "title": book.series.title,
-            "order": book.series_order,
-        }
+        return SeriesRef(
+            id=book.series.id,
+            title=book.series.title,
+            order=book.series_order,
+        )
     return None
 
 
-def _chapters_to_out(book: Book) -> list[dict]:
+def _chapters_to_out(book: Book) -> list[ChapterOut]:
     return [
-        {
-            "id": c.id,
-            "ordinal": c.ordinal,
-            "title": c.title,
-            "duration_sec": c.duration_sec,
-            "size_bytes": c.size_bytes,
-            "status": c.status,
-            "progress": round(c.progress, 3),
-            "stream_url": f"/books/{book.id}/stream/{c.id}",
-        }
+        ChapterOut(
+            id=c.id,
+            ordinal=c.ordinal,
+            title=c.title,
+            duration_sec=c.duration_sec,
+            size_bytes=c.size_bytes,
+            status=c.status,
+            progress=round(c.progress, 3),
+            stream_url=f"/books/{book.book_hash}/stream/{c.id}",
+        )
         for c in book.chapters
     ]
 
@@ -71,7 +71,7 @@ def _release_book_to_out(book: Book, api_base: str) -> dict:
     size = sum(c.size_bytes for c in chapters) or None
 
     return {
-        "id": book.id,
+        "id": book.book_hash,
         "ordinal": book.ordinal,
         "title": book.title,
         "folder": book.folder,
@@ -84,7 +84,7 @@ def _release_book_to_out(book: Book, api_base: str) -> dict:
         # признак «книга ещё не полностью определена»: данные могут измениться
         "is_provisional": book.is_provisional,
         # cover_url всегда не-null: /books/{id}/cover отдаёт обложку или placeholder
-        "cover_url": f"{api_base}/books/{book.id}/cover",
+        "cover_url": f"{api_base}/books/{book.book_hash}/cover",
         "cover_is_temp": book.cover_is_temp,
         "last_accessed": book.last_accessed,
     }
@@ -140,30 +140,30 @@ def _release_detail(release: Release, api_base: str) -> ReleaseDetailOut:
 
 
 def _book_to_out(book: Book, api_base: str) -> BookOut:
-    release = book.release
+    release = book.releases[0] if book.releases else None
     chapters = list(book.chapters)
     duration = sum(c.duration_sec or 0 for c in chapters) or None
     size = sum(c.size_bytes for c in chapters) or None
 
     return BookOut(
-        id=book.id,
+        id=book.book_hash,
         ordinal=book.ordinal,
         title=book.title,
-        author=_author_of(release),
-        narrator=_narrator_of(release),
-        year=release.year,
-        language=release.language,
+        author=_author_of(release) if release else None,
+        narrator=_narrator_of(release) if release else None,
+        year=release.year if release else None,
+        language=release.language if release else None,
         series=_series_ref(book),
-        rubrics=_rubrics_of(release),
+        rubrics=_rubrics_of(release) if release else [],
         status=book.status,
         chapters_count=len(chapters),
         chapters_ready=sum(1 for c in chapters if c.status == "ready"),
         total_duration_sec=duration,
         size_bytes=size,
         is_provisional=book.is_provisional,
-        cover_url=f"{api_base}/books/{book.id}/cover",
+        cover_url=f"{api_base}/books/{book.book_hash}/cover",
         cover_is_temp=book.cover_is_temp,
-        added_at=release.added_at,
+        added_at=release.added_at if release else None,
         last_accessed=book.last_accessed,
     )
 
@@ -171,12 +171,12 @@ def _book_to_out(book: Book, api_base: str) -> BookOut:
 def _book_detail(book: Book, api_base: str) -> BookDetailOut:
     base = _book_to_out(book, api_base).model_dump()
 
-    release = book.release
+    release = book.releases[0] if book.releases else None
     base["title_raw"] = book.title_raw
-    base["description"] = release.description
+    base["description"] = release.description if release else None
     base["persons"] = [
         {"name": rp.person.name, "role": rp.role} for rp in release.persons
-    ]
+    ] if release else []
     base["chapters"] = _chapters_to_out(book)
 
     return BookDetailOut(**base)
@@ -281,7 +281,7 @@ def list_books(
 
 @router.get("/books/{book_id}", response_model=BookDetailOut)
 def get_book(
-    book_id: int,
+    book_id: str,
     request: Request,
     db: Session = Depends(get_db),
 ):
@@ -290,5 +290,5 @@ def get_book(
         raise HTTPException(404, "book not found")
 
     api_base = str(request.base_url).rstrip("/")
-    log.debug("get_book: id=%d", book_id)
+    log.debug("get_book: hash=%s", book_id[:12])
     return _book_detail(book, api_base)

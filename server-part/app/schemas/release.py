@@ -11,7 +11,7 @@ from app.schemas.series import SeriesRef
 
 class ReleaseBookOut(BaseModel):
     """Книга (том) внутри карточки раздачи — краткое представление."""
-    id: int
+    id: str
     ordinal: int
     title: str
     folder: str | None = None

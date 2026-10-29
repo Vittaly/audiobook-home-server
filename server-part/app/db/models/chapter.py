@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -8,6 +9,8 @@ from sqlalchemy import (
     Integer, String, Text, UniqueConstraint, func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+log = logging.getLogger(__name__)
 
 from app.db.base import Base
 from app.db.models.enums import ChapterStatus
@@ -19,12 +22,12 @@ if TYPE_CHECKING:
 
 class Chapter(Base):
     """
-    Глава = один аудиофайл внутри раздачи.
-    При изменении статуса каскадно пересчитывает статус книги.
+    Глава = один аудиофайл. Привязана к книге (book_hash FK) и опционально
+    к раздаче (release_id). Статус каскадно пересчитывает статус книги.
     """
-    __tablename__ = "chapter"
+    __tablename__ = "chapters"
     __table_args__ = (
-        UniqueConstraint("book_id", "ordinal", name="ux_chapter_ordinal"),
+        UniqueConstraint("book_hash", "ordinal", name="ux_chapter_ordinal"),
         CheckConstraint(
             "status IN ('absent','downloading','partial','ready',"
             "'deleting','deleted','error')",
@@ -32,11 +35,16 @@ class Chapter(Base):
         ),
     )
 
-    id:         Mapped[int] = mapped_column(Integer, primary_key=True)
-    book_id:    Mapped[int] = mapped_column(
-        ForeignKey("book.id", ondelete="CASCADE"), nullable=False, index=True)
-    release_id: Mapped[int] = mapped_column(
-        ForeignKey("release.id", ondelete="CASCADE"), nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    book_hash: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("books.book_hash", ondelete="CASCADE"),
+        nullable=False, index=True)
+
+    release_id: Mapped[int | None] = mapped_column(
+        ForeignKey("releases.id", ondelete="CASCADE"),
+        nullable=True, index=True)
 
     ordinal:     Mapped[int] = mapped_column(Integer, nullable=False)
     file_index:  Mapped[int] = mapped_column(Integer, nullable=False)
@@ -56,12 +64,13 @@ class Chapter(Base):
     title:        Mapped[str | None] = mapped_column(String(500))
     duration_sec: Mapped[int | None] = mapped_column(Integer)
 
+    download_priority: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_streamed_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
     last_modified_at: Mapped[datetime] = mapped_column(
         DateTime, default=func.now(), nullable=False)
 
     book:    Mapped["Book"]    = relationship(back_populates="chapters")
-    release: Mapped["Release"] = relationship(back_populates="chapters")
+    release: Mapped["Release | None"] = relationship(back_populates="chapters")
 
     # ---------- поведение ----------
 
@@ -106,3 +115,33 @@ class Chapter(Base):
 
     def mark_streamed(self) -> None:
         self.last_streamed_at = datetime.utcnow()
+
+    # ---------- загрузка ----------
+
+    async def start_download(
+        self,
+        priority: int | None = None,
+    ) -> bool:
+        """Запускает загрузку этой главы через релиз.
+
+        Делегирует self.release.start_download_file(self.rel_path, priority).
+        Релиз сам решает, как добавить торрент в клиент и выставить приоритет.
+
+        Args:
+            priority: 0=skip, 1=low, 2=normal, 3=high.
+                      Если None — оставляет текущий приоритет (default=1).
+
+        Returns:
+            True, если релиз добавил торрент и выставил приоритет.
+        """
+        if not self.release:
+            log.warning("chapter=%s: нет раздачи для загрузки", self.id)
+            return False
+
+        effective_priority = priority if priority is not None else 1
+
+        if priority is not None:
+            self.download_priority = priority
+
+        return await self.release.start_download_file(
+            self.rel_path, priority=effective_priority)

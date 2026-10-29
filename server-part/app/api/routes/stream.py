@@ -26,9 +26,9 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/books/{book_id}/stream/{chapter_id}")
+@router.get("/books/{book_hash}/stream/{chapter_id}")
 def stream_chapter(
-    book_id: int,
+    book_hash: str,
     chapter_id: int,
     request: Request,
     range_header: str | None = Header(None, alias="Range"),
@@ -39,12 +39,12 @@ def stream_chapter(
     Продлевает TTL книги и главы через activity.touch_chapter.
     """
     chapter = service.get_chapter_full(db, chapter_id)
-    if chapter is None or chapter.book_id != book_id:
+    if chapter is None or chapter.book_hash != book_hash:
         raise HTTPException(404, "chapter not found")
 
     # активность: обновляет book.last_accessed, chapter.last_streamed_at
     # и пишет запись в access_log с chapter_id
-    activity.touch_chapter(db, book_id, chapter_id, action="stream")
+    activity.touch_chapter(db, book_hash, chapter_id, action="stream")
     db.commit()
 
     # Глава может быть готова в торрент-клиенте, но поллер ещё не успел
@@ -53,14 +53,14 @@ def stream_chapter(
     chapter = sync_chapter_status(chapter, db)
 
     log.info("stream: book=%s chapter=%s status=%s range=%s",
-             book_id, chapter_id, chapter.status, range_header)
+             book_hash[:12], chapter_id, chapter.status, range_header)
 
     return serve_chapter(chapter, range_header)
 
 
-@router.head("/books/{book_id}/stream/{chapter_id}")
+@router.head("/books/{book_hash}/stream/{chapter_id}")
 def stream_chapter_head(
-    book_id: int,
+    book_hash: str,
     chapter_id: int,
     db: Session = Depends(get_db),
 ):
@@ -70,7 +70,7 @@ def stream_chapter_head(
     Активность не трогаем — GET сделает это сам.
     """
     chapter = service.get_chapter_full(db, chapter_id)
-    if chapter is None or chapter.book_id != book_id:
+    if chapter is None or chapter.book_hash != book_hash:
         raise HTTPException(404, "chapter not found")
 
     chapter = sync_chapter_status(chapter, db)

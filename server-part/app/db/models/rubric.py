@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import logging
+
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, UniqueConstraint, select
+from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
 from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.db.models.release import Release
+
+log = logging.getLogger(__name__)
+
+
+def _norm(s: str) -> str:
+    return " ".join(s.lower().split())
 
 
 class Rubric(Base):
@@ -27,12 +35,42 @@ class Rubric(Base):
     releases: Mapped[list["ReleaseRubric"]] = relationship(
         back_populates="rubric", cascade="all, delete-orphan")
 
+    # ---------------------------------------------------------------
+    # CRUD
+    # ---------------------------------------------------------------
+
+    @classmethod
+    def find_or_create(cls, db: Session, kind: str, title: str) -> "Rubric":
+        """Находит рубрику по типу + нормализованному названию или создаёт.
+
+        Args:
+            db:    открытая сессия.
+            kind:  'genre' | 'tag' | 'rubric'.
+            title: название рубрики.
+
+        Returns:
+            Существующий или новый экземпляр Rubric (уже добавлен в сессию).
+        """
+        title_norm = _norm(title)
+        rubric = db.execute(
+            select(cls).where(
+                cls.kind == kind,
+                cls.title_norm == title_norm,
+            )
+        ).scalar_one_or_none()
+        if rubric is None:
+            rubric = cls(kind=kind, title=title, title_norm=title_norm)
+            db.add(rubric)
+            db.flush()
+            log.info("rubric: создана новая %r / %s", title, kind)
+        return rubric
+
 
 class ReleaseRubric(Base):
     __tablename__ = "release_rubric"
 
     release_id: Mapped[int] = mapped_column(
-        ForeignKey("release.id", ondelete="CASCADE"), primary_key=True)
+        ForeignKey("releases.id", ondelete="CASCADE"), primary_key=True)
     rubric_id:  Mapped[int] = mapped_column(
         ForeignKey("rubric.id", ondelete="CASCADE"), primary_key=True)
 

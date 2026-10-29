@@ -11,7 +11,7 @@ from app.schemas.series import SeriesRef
 
 class BookOut(BaseModel):
     """Книга (том) для списков по всему каталогу."""
-    id: int
+    id: str
     ordinal: int = 1
     title: str
     author: str | None = None
@@ -35,7 +35,7 @@ class BookOut(BaseModel):
     cover_url: str | None = None
     cover_is_temp: bool = False
 
-    added_at: datetime
+    added_at: datetime | None = None
     last_accessed: datetime | None = None
 
 

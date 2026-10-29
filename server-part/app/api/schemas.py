@@ -30,6 +30,6 @@ class DownloadRequest(BaseModel):
 
 class DeleteResponse(BaseModel):
     """Ответ на DELETE-операции."""
-    book_id: int
+    book_id: str
     state: str
     message: str | None = None

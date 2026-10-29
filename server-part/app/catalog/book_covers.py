@@ -32,7 +32,7 @@ from app.db.session import session_scope
 log = logging.getLogger(__name__)
 
 
-async def search_book_cover_detached(covers: CoverService, book_id: int) -> bool:
+async def search_book_cover_detached(covers: CoverService, book_hash: str) -> bool:
     """
     Онлайн-поиск обложки книги БЕЗ открытой БД-транзакции.
 
@@ -51,7 +51,7 @@ async def search_book_cover_detached(covers: CoverService, book_id: int) -> bool
     # ---------- 1. Короткая транзакция: читаем книгу ----------
     with session_scope() as db:
         book = db.execute(
-            select(Book).where(Book.id == book_id)
+            select(Book).where(Book.book_hash == book_hash)
         ).scalar_one_or_none()
         if book is None:
             return False
@@ -65,21 +65,21 @@ async def search_book_cover_detached(covers: CoverService, book_id: int) -> bool
         if not settings.COVER_SEARCH_ENABLED:
             return False
 
-        release = book.release
+        release = book.releases[0] if book.releases else None
         if release is None:
             return False
 
         title = _clean_book_title(book.title or release.title)
-        author = _release_author(release)
+        author = release.release_author
 
     # ---------- 2. Сеть: база данных НЕ залочена ----------
     result = None
     try:
         log.info("book=%s: ищем обложку в интернете (%s — %s)",
-                 book_id, author, title)
+                 book_hash[:12], author, title)
         result = await search_cover(title, author)
     except Exception:
-        log.exception("book=%s: сбой поиска обложки", book_id)
+        log.exception("book=%s: сбой поиска обложки", book_hash[:12])
 
     meta = None
     try:
@@ -87,12 +87,12 @@ async def search_book_cover_detached(covers: CoverService, book_id: int) -> bool
             meta = await covers.fetch_url_to_cache(result.url)
     except Exception:
         log.exception("book=%s: сбой скачивания обложки %s",
-                      book_id, result.url if result else "?")
+                      book_hash[:12], result.url if result else "?")
         meta = None
 
     # ---------- 3. Короткая транзакция: применяем результат ----------
     with session_scope() as db:
-        book = db.get(Book, book_id)
+        book = db.get(Book, book_hash)
         if book is None:
             return False
 
@@ -103,15 +103,17 @@ async def search_book_cover_detached(covers: CoverService, book_id: int) -> bool
             book.cover_mime = meta["mime"]
             book.cover_is_temp = False
             book.cover_retry_count = 0
-            log.info("book=%s: обложка из %s (%s)",
-                     book_id, result.source, result.url)
+            if result is not None:
+                log.info("book=%s: обложка из %s (%s)",
+                         book_hash[:12], result.source, result.url)
             return True
 
         if result is not None:
             log.warning("book=%s: не скачана обложка из %s (%s)",
-                        book_id, result.source, result.url)
+                        book_hash[:12], result.source, result.url)
         else:
-            log.warning("book=%s: обложка не найдена в интернете", book_id)
+            log.warning("book=%s: обложка не найдена в интернете",
+                        book_hash[:12])
         book.cover_retry_count = (book.cover_retry_count or 0) + 1
         return False
 
@@ -132,7 +134,7 @@ async def try_search_book_cover(
 
     if (book.cover_retry_count or 0) >= settings.COVER_RETRY_LIMIT:
         log.debug("book=%s: исчерпан лимит ретраев обложки (%d)",
-                  book.id, settings.COVER_RETRY_LIMIT)
+                  book.book_hash[:12], settings.COVER_RETRY_LIMIT)
         return False
 
     if not settings.COVER_SEARCH_ENABLED:
@@ -141,18 +143,19 @@ async def try_search_book_cover(
     from app.catalog.cover_search import search_cover
 
     title = _clean_book_title(book.title or release.title)
-    author = _release_author(release)
+    author = release.release_author
 
     log.info("book=%s: ищем обложку в интернете (%s — %s)",
-             book.id, author, title)
+             book.book_hash[:12], author, title)
     try:
         result = await search_cover(title, author)
     except Exception:
-        log.exception("book=%s: сбой поиска обложки", book.id)
+        log.exception("book=%s: сбой поиска обложки", book.book_hash[:12])
         result = None
 
     if result is None:
-        log.warning("book=%s: обложка не найдена в интернете", book.id)
+        log.warning("book=%s: обложка не найдена в интернете",
+                    book.book_hash[:12])
         _bump_retry(book)
         return False
 
@@ -160,19 +163,20 @@ async def try_search_book_cover(
         ok = await covers.fetch_from_url(book, result.url)
     except Exception:
         log.exception("book=%s: сбой скачивания обложки %s",
-                      book.id, result.url)
+                      book.book_hash[:12], result.url)
         ok = False
 
     if not ok:
         log.warning("book=%s: не скачана обложка из %s (%s)",
-                    book.id, result.source, result.url)
+                    book.book_hash[:12], result.source, result.url)
         _bump_retry(book)
         return False
 
     book.cover_origin = "online"
     book.cover_is_temp = False
     book.cover_retry_count = 0
-    log.info("book=%s: обложка из %s (%s)", book.id, result.source, result.url)
+    log.info("book=%s: обложка из %s (%s)",
+             book.book_hash[:12], result.source, result.url)
     return True
 
 
@@ -197,10 +201,3 @@ def _clean_book_title(title: str) -> str:
     ).strip()
     return text
 
-
-def _release_author(release: Release) -> str:
-    """Имя автора из персон раздачи."""
-    for rp in release.persons:
-        if rp.role == "author":
-            return rp.person.name
-    return ""

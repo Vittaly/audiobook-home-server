@@ -50,7 +50,7 @@ _TEMP_HEADERS = {
 # (HEAD — без тела картинки), чтобы узнать, финальная ли уже обложка.
 @router.api_route("/books/{book_id}/cover", methods=["GET", "HEAD"])
 def get_book_cover(
-    book_id: int,
+    book_id: str,
     request: Request,
     db: Session = Depends(get_db),
 ):
@@ -78,7 +78,7 @@ def get_book_cover(
     # Временная обложка: своя ещё не получена — отдаём обложку раздачи
     # (или placeholder с тем же признаком) с X-Cover-Temp: true.
     if book.cover_is_temp and not book.cover_cache_path:
-        release = book.release
+        release = book.releases[0] if book.releases else None
         if release is not None:
             return _serve_temp_release_cover(release, request)
 
@@ -139,7 +139,7 @@ def get_release_cover(
     return _serve_cover("release", release_id, release, request)
 
 
-def _serve_cover(kind: str, owner_id: int, owner, request: Request) -> Response:
+def _serve_cover(kind: str, owner_id: int | str, owner, request: Request) -> Response:
     """Общий отдатчик обложки: кэш → placeholder."""
     # --- реальная обложка из кэша ---
     if owner.cover_cache_path:

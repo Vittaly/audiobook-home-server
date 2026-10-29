@@ -40,13 +40,13 @@ ALL_ACTIONS = frozenset({
 # ПУБЛИЧНОЕ API
 # ============================================================
 
-def touch(db: Session, book_id: int, action: str) -> None:
+def touch(db: Session, book_hash: str, action: str) -> None:
     """
     Фиксирует обращение к книге.
 
-    :param db:      SQLAlchemy-сессия (не коммитит — это делает вызывающий)
-    :param book_id: ID книги
-    :param action:  'stream' | 'download' | 'list' | 'detail' | 'delete'
+    :param db:        SQLAlchemy-сессия (не коммитит — это делает вызывающий)
+    :param book_hash: book_hash (первичный ключ Book)
+    :param action:    'stream' | 'download' | 'list' | 'detail' | 'delete'
     """
     if action not in ALL_ACTIONS:
         log.warning("activity.touch: неизвестный action=%r, "
@@ -54,9 +54,9 @@ def touch(db: Session, book_id: int, action: str) -> None:
         action = "detail"
 
     try:
-        book = db.get(Book, book_id)
+        book = db.get(Book, book_hash)
         if book is None:
-            log.debug("activity.touch: book=%s не найден, пропуск", book_id)
+            log.debug("activity.touch: book=%s не найден, пропуск", book_hash)
             return
 
         now = datetime.now(timezone.utc)
@@ -65,11 +65,11 @@ def touch(db: Session, book_id: int, action: str) -> None:
         if action in TTL_ACTIONS:
             book.last_accessed = now
             log.info("activity: book=%s action=%s → last_accessed=%s",
-                     book_id, action, now.isoformat())
+                     book_hash, action, now.isoformat())
 
         # --- запись в access_log ---
         db.add(AccessLog(
-            book_id=book_id,
+            book_hash=book_hash,
             action=action,
             accessed_at=now,
         ))
@@ -77,10 +77,10 @@ def touch(db: Session, book_id: int, action: str) -> None:
     except Exception:
         # не даём упасть основному запросу из-за логирования активности
         log.exception("activity.touch: ошибка book=%s action=%s",
-                      book_id, action)
+                      book_hash, action)
 
 
-def touch_chapter(db: Session, book_id: int, chapter_id: int,
+def touch_chapter(db: Session, book_hash: str, chapter_id: int,
                   action: str = "stream") -> None:
     """
     Отмечает обращение к конкретной главе.
@@ -93,17 +93,17 @@ def touch_chapter(db: Session, book_id: int, chapter_id: int,
     from app.db.models import Chapter
 
     try:
-        book = db.get(Book, book_id)
+        book = db.get(Book, book_hash)
         if book is None:
-            log.debug("activity.touch_chapter: book=%s не найден", book_id)
+            log.debug("activity.touch_chapter: book=%s не найден", book_hash)
             return
 
         chapter = db.get(Chapter, chapter_id)
-        if chapter is None or chapter.book_id != book_id:
+        if chapter is None or chapter.book_hash != book_hash:
             log.debug("activity.touch_chapter: chapter=%s не найден "
-                      "или не принадлежит book=%s", chapter_id, book_id)
+                      "или не принадлежит book=%s", chapter_id, book_hash)
             # всё равно пишем обращение к книге
-            touch(db, book_id, action)
+            touch(db, book_hash, action)
             return
 
         now = datetime.now(timezone.utc)
@@ -115,18 +115,18 @@ def touch_chapter(db: Session, book_id: int, chapter_id: int,
             chapter.last_streamed_at = now
 
         db.add(AccessLog(
-            book_id=book_id,
+            book_hash=book_hash,
             chapter_id=chapter_id,
             action=action,
             accessed_at=now,
         ))
 
         log.info("activity: book=%s chapter=%s action=%s",
-                 book_id, chapter_id, action)
+                 book_hash, chapter_id, action)
 
     except Exception:
         log.exception("activity.touch_chapter: ошибка book=%s chapter=%s",
-                      book_id, chapter_id)
+                      book_hash, chapter_id)
 
 
 # ============================================================

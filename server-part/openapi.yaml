@@ -231,13 +231,13 @@ paths:
                 $ref: "#/components/schemas/BookListResponse"
       x-status: ready
 
-  /books/{book_id}:
+  /books/{book_hash}:
     get:
       tags: [books]
       summary: Карточка книги с главами
       operationId: getBook
       parameters:
-        - $ref: "#/components/parameters/BookId"
+        - $ref: "#/components/parameters/BookHash"
       responses:
         "200":
           description: Книга (том)
@@ -257,7 +257,7 @@ paths:
         Метаданные книги сохраняются, статус становится `deleted`.
       operationId: deleteBook
       parameters:
-        - $ref: "#/components/parameters/BookId"
+        - $ref: "#/components/parameters/BookHash"
       responses:
         "200":
           description: Книга удалена
@@ -272,7 +272,7 @@ paths:
   # ============================================================
   # COVERS
   # ============================================================
-  /books/{book_id}/cover:
+  /books/{book_hash}/cover:
     get:
       tags: [covers]
       summary: Обложка книги (тома)
@@ -288,7 +288,7 @@ paths:
         свою обложку после докачки файла или онлайн-поиска.
       operationId: getBookCover
       parameters:
-        - $ref: "#/components/parameters/BookId"
+        - $ref: "#/components/parameters/BookHash"
       responses:
         "200":
           description: Изображение
@@ -319,7 +319,44 @@ paths:
   # ============================================================
   # DOWNLOADS
   # ============================================================
-  /books/{book_id}/download:
+  /releases/{release_id}/download:
+    post:
+      tags: [downloads]
+      summary: Начать загрузку всей раздачи
+      operationId: startReleaseDownload
+      description: |
+        Запускает загрузку торрента на уровне карточки раздачи.
+        Книг до старта загрузки может не быть (сервер не создаёт книгу-
+        заглушку) — клиент поллит каталог и берёт первую книгу по порядку
+        по факту появления. В ответе `book_id` равен `null`.
+      parameters:
+        - $ref: "#/components/parameters/ReleaseId"
+      responses:
+        "202":
+          description: Загрузка начата
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadStartedOut"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          description: Не удалось добавить раздачу в торрент-клиент
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "507":
+          description: Недостаточно места на диске
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-status: ready
+
+  /books/{book_hash}/download:
     post:
       tags: [downloads]
       summary: Начать загрузку книги
@@ -328,7 +365,7 @@ paths:
         Запускает загрузку раздачи, к которой относится книга.
         Торрент добавляется в клиент; книга и карточка переходят в `downloading`.
       parameters:
-        - $ref: "#/components/parameters/BookId"
+        - $ref: "#/components/parameters/BookHash"
       responses:
         "202":
           description: Загрузка начата
@@ -353,7 +390,7 @@ paths:
       summary: Остановить загрузку
       operationId: stopDownload
       parameters:
-        - $ref: "#/components/parameters/BookId"
+        - $ref: "#/components/parameters/BookHash"
         - name: delete_files
           in: query
           schema: {type: boolean, default: false}
@@ -369,7 +406,7 @@ paths:
           $ref: "#/components/responses/NotFound"
       x-status: ready
 
-  /books/{book_id}/status:
+  /books/{book_hash}/status:
     get:
       tags: [downloads]
       summary: Статус загрузки
@@ -378,7 +415,7 @@ paths:
         данные остального — из БД. Есть дополнительный `release_id`.
       operationId: getDownloadStatus
       parameters:
-        - $ref: "#/components/parameters/BookId"
+        - $ref: "#/components/parameters/BookHash"
       responses:
         "200":
           description: Статус
@@ -390,13 +427,13 @@ paths:
           $ref: "#/components/responses/NotFound"
       x-status: ready
 
-  /books/{book_id}/priority:
+  /books/{book_hash}/priority:
     post:
       tags: [downloads]
       summary: Закрепить книгу (приоритет)
       operationId: setBookPriority
       parameters:
-        - $ref: "#/components/parameters/BookId"
+        - $ref: "#/components/parameters/BookHash"
       requestBody:
         required: true
         content:
@@ -419,7 +456,7 @@ paths:
   # ============================================================
   # STREAMING
   # ============================================================
-  /books/{book_id}/stream/{chapter_id}:
+  /books/{book_hash}/stream/{chapter_id}:
     get:
       tags: [streaming]
       summary: Отдать главу
@@ -437,7 +474,7 @@ paths:
         - Каждое обращение фиксирует `chapter.last_streamed_at` (для TTL).
       operationId: streamChapter
       parameters:
-        - $ref: "#/components/parameters/BookId"
+        - $ref: "#/components/parameters/BookHash"
         - $ref: "#/components/parameters/ChapterId"
         - name: Range
           in: header
@@ -475,7 +512,7 @@ paths:
       summary: Заголовки главы без тела
       operationId: headChapter
       parameters:
-        - $ref: "#/components/parameters/BookId"
+        - $ref: "#/components/parameters/BookHash"
         - $ref: "#/components/parameters/ChapterId"
       responses:
         "200":
@@ -653,11 +690,13 @@ paths:
 components:
 
   parameters:
-    BookId:
-      name: book_id
+    BookHash:
+      name: book_hash
       in: path
       required: true
-      schema: {type: integer, minimum: 1}
+      description: SHA256-хэш книги (строка — первичный ключ Book)
+      schema: {type: string}
+      example: a1b2c3d4e5f6
     ReleaseId:
       name: release_id
       in: path
@@ -761,7 +800,7 @@ components:
         progress: {type: number, format: float, minimum: 0, maximum: 1}
         stream_url:
           type: string
-          example: "/books/42/stream/101"
+          example: "/books/a1b2c3d4e5f6/stream/101"
 
     # ---------- Карточки раздач (releases) ----------
 
@@ -769,7 +808,7 @@ components:
       type: object
       required: [id, ordinal, title, status]
       properties:
-        id: {type: integer}
+        id: {type: string}
         ordinal: {type: integer}
         title: {type: string}
         folder: {type: string, nullable: true}
@@ -779,20 +818,27 @@ components:
         chapters_ready: {type: integer}
         total_duration_sec: {type: integer, nullable: true}
         size_bytes: {type: integer, nullable: true}
+        is_provisional:
+          type: boolean
+          default: false
+          description: |
+            Признак «книга ещё не полностью определена»: данные книги
+            (главы, описание) могут измениться; снимается после
+            получения глав/описания.
         cover_url:
           type: string
           nullable: true
           description: |
             Ссылка на обложку книги. Эндпоинт отдаёт обложку или
             placeholder, поэтому в ответе сервера URL не бывает null.
-          example: "http://192.168.1.10:8000/books/7/cover"
+          example: "http://192.168.1.10:8000/books/a1b2c3d4e5f6/cover"
         cover_is_temp:
           type: boolean
           default: false
           description: |
             Признак временной обложки книги (актуально для многотомных
             раздач): пока `true` и у книги нет своей обложки, эндпоинт
-            /books/{id}/cover отдаёт обложку карточки-раздачи и ставит
+            /books/{book_hash}/cover отдаёт обложку карточки-раздачи и ставит
             заголовок X-Cover-Temp: true — клиент перезапрашивает картинку.
         last_accessed: {type: string, format: date-time, nullable: true}
 
@@ -807,7 +853,7 @@ components:
 
     ReleaseOut:
       type: object
-      required: [id, title, status, added_at]
+      required: [id, title, status, added_at, released_at]
       properties:
         id: {type: integer}
         title: {type: string}
@@ -838,7 +884,14 @@ components:
             Ссылка на обложку карточки. Эндпоинт отдаёт обложку или
             placeholder, поэтому в ответе сервера URL не бывает null.
           example: "http://192.168.1.10:8000/releases/3/cover"
-        added_at: {type: string, format: date-time}
+        added_at:
+          type: string
+          format: date-time
+          description: Время индексации раздачи на сервере
+        released_at:
+          type: string
+          format: date-time
+          description: Дата создания раздачи на трекере (сортировка «сначала новые» идёт по ней)
         downloaded_at: {type: string, format: date-time, nullable: true}
         last_accessed: {type: string, format: date-time, nullable: true}
 
@@ -869,9 +922,9 @@ components:
 
     BookOut:
       type: object
-      required: [id, ordinal, title, status, cover_url, added_at]
+      required: [id, ordinal, title, status, cover_url]
       properties:
-        id: {type: integer}
+        id: {type: string}
         ordinal: {type: integer}
         title: {type: string}
         author: {type: string, nullable: true}
@@ -887,22 +940,29 @@ components:
         chapters_ready: {type: integer}
         total_duration_sec: {type: integer, nullable: true}
         size_bytes: {type: integer, nullable: true}
+        is_provisional:
+          type: boolean
+          default: false
+          description: |
+            Признак «книга ещё не полностью определена»: данные книги
+            (главы, описание) могут измениться; снимается после
+            получения глав/описания.
         cover_url:
           type: string
           nullable: true
           description: |
             Ссылка на обложку книги. Эндпоинт отдаёт обложку или
             placeholder, поэтому в ответе сервера URL не бывает null.
-          example: "http://192.168.1.10:8000/books/42/cover"
+          example: "http://192.168.1.10:8000/books/a1b2c3d4e5f6/cover"
         cover_is_temp:
           type: boolean
           default: false
           description: |
             Признак временной обложки книги (актуально для многотомных
             раздач): пока `true` и у книги нет своей обложки, эндпоинт
-            /books/{id}/cover отдаёт обложку карточки-раздачи и ставит
+            /books/{book_hash}/cover отдаёт обложку карточки-раздачи и ставит
             заголовок X-Cover-Temp: true — клиент перезапрашивает картинку.
-        added_at: {type: string, format: date-time}
+        added_at: {type: string, format: date-time, nullable: true}
         last_accessed: {type: string, format: date-time, nullable: true}
 
     BookDetailOut:
@@ -936,7 +996,11 @@ components:
       type: object
       required: [book_id, client_id, status, save_path, message]
       properties:
-        book_id: {type: integer}
+        book_id:
+          type: string
+          nullable: true
+          description: Хэш книги; null при запуске загрузки всей раздачи (книги ещё нет)
+        release_id: {type: integer, nullable: true}
         client_id:
           type: integer
           nullable: true
@@ -949,7 +1013,7 @@ components:
       type: object
       required: [book_id, status, message]
       properties:
-        book_id: {type: integer}
+        book_id: {type: string}
         status: {$ref: "#/components/schemas/BookStatus"}
         message: {type: string}
 
@@ -968,10 +1032,10 @@ components:
     DownloadStatusOut:
       type: object
       required:
-        [book_id, release_id, status, progress, total_bytes, downloaded_bytes,
+        [book_hash, release_id, status, progress, total_bytes, downloaded_bytes,
          speed_bps, peers, seeds, chapters_ready, chapters_total, chapters]
       properties:
-        book_id: {type: integer}
+        book_hash: {type: string}
         release_id: {type: integer, nullable: true}
         status: {$ref: "#/components/schemas/BookStatus"}
         client_state:
@@ -996,9 +1060,8 @@ components:
       type: object
       required: [book_id, status, message]
       properties:
-        book_id: {type: integer}
+        book_id: {type: string}
         status: {$ref: "#/components/schemas/BookStatus"}
-        freed_bytes: {type: integer}
         message: {type: string}
 
     PriorityRequest:
@@ -1015,7 +1078,7 @@ components:
       type: object
       required: [book_id, priority, message]
       properties:
-        book_id: {type: integer}
+        book_id: {type: string}
         priority: {type: integer}
         message: {type: string}
 

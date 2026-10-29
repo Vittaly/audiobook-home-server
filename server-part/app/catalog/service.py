@@ -110,7 +110,9 @@ def list_books(db: Session, *,
                sort: str = "added_at",
                order: str = "desc") -> tuple[list[Book], int]:
     """Книги (тома) по всему каталогу. Поля карточки берутся из раздачи."""
-    stmt = select(Book).join(Book.release)
+    # M:N: книга может быть в нескольких раздачах или вообще без раздачи
+    # (placeholder) — используем outerjoin, чтобы не терять такие книги.
+    stmt = select(Book).outerjoin(Book.releases).distinct()
 
     if query:
         stmt = stmt.where(Book.title_norm.like(f"{query.lower()}%"))
@@ -154,8 +156,8 @@ def list_books(db: Session, *,
 
     stmt = stmt.order_by(sort_col).limit(limit).offset(offset)
     stmt = stmt.options(
-        selectinload(Book.release).selectinload(Release.persons),
-        selectinload(Book.release).selectinload(Release.rubrics),
+        selectinload(Book.releases).selectinload(Release.persons),
+        selectinload(Book.releases).selectinload(Release.rubrics),
         selectinload(Book.series),
     )
 
@@ -163,22 +165,22 @@ def list_books(db: Session, *,
     return books, total
 
 
-def get_book(db: Session, book_id: int) -> Book | None:
+def get_book(db: Session, book_hash: str) -> Book | None:
     """Книга с главами и данными карточки раздачи."""
     return db.execute(
-        select(Book).where(Book.id == book_id)
+        select(Book).where(Book.book_hash == book_hash)
         .options(
             selectinload(Book.chapters),
             selectinload(Book.series),
-            selectinload(Book.release).selectinload(Release.persons),
-            selectinload(Book.release).selectinload(Release.rubrics),
+            selectinload(Book.releases).selectinload(Release.persons),
+            selectinload(Book.releases).selectinload(Release.rubrics),
         )
     ).scalar_one_or_none()
 
 
-def get_chapters(db: Session, book_id: int) -> list[Chapter]:
+def get_chapters(db: Session, book_hash: str) -> list[Chapter]:
     return list(db.execute(
-        select(Chapter).where(Chapter.book_id == book_id)
+        select(Chapter).where(Chapter.book_hash == book_hash)
         .order_by(Chapter.ordinal)
     ).scalars().all())
 
@@ -197,15 +199,15 @@ def get_chapter_full(db: Session, chapter_id: int) -> Chapter | None:
 # СТАТУС ЗАГРУЗКИ
 # ============================================================
 
-def get_download_status(db: Session, book_id: int) -> dict | None:
+def get_download_status(db: Session, book_hash: str) -> dict | None:
     """Сводка прогресса загрузки книги: БД + торрент-клиент."""
     from app.torrents import manager
 
-    book = get_book(db, book_id)
+    book = get_book(db, book_hash)
     if book is None:
         return None
 
-    release = book.release
+    release = book.releases[0] if book.releases else None
 
     chapters_total = len(book.chapters)
     chapters_ready = sum(1 for c in book.chapters if c.status == "ready")
@@ -231,7 +233,7 @@ def get_download_status(db: Session, book_id: int) -> dict | None:
                 progress = torrent.progress
 
     return {
-        "book_id": book.id,
+        "book_hash": book.book_hash,
         "release_id": release.id if release is not None else None,
         "status": book.status,
         "client_state": client_state,
@@ -261,12 +263,12 @@ def get_download_status(db: Session, book_id: int) -> dict | None:
 # ============================================================
 
 def resolve_cover_url(owner, api_base: str) -> str:
-    """Стабильный URL обложки: /releases/{id}/cover или /books/{id}/cover."""
+    """Стабильный URL обложки: /releases/{id}/cover или /books/{hash}/cover."""
     from app.db.models import Book, Release
 
     if isinstance(owner, Release):
         return f"{api_base}/releases/{owner.id}/cover"
     if isinstance(owner, Book):
-        return f"{api_base}/books/{owner.id}/cover"
+        return f"{api_base}/books/{owner.book_hash}/cover"
     kind = type(owner).__name__
     return f"{api_base}/{kind.lower()}s/{owner.id}/cover"

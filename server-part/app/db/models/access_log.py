@@ -20,8 +20,8 @@ class AccessLog(Base):
     )
 
     id:          Mapped[int] = mapped_column(Integer, primary_key=True)
-    book_id:     Mapped[int] = mapped_column(
-        ForeignKey("book.id", ondelete="CASCADE"), nullable=False, index=True)
+    book_hash:   Mapped[str] = mapped_column(
+        ForeignKey("books.book_hash", ondelete="CASCADE"), nullable=False, index=True)
     chapter_id:  Mapped[int | None] = mapped_column(
         ForeignKey("chapter.id", ondelete="SET NULL"))
     action:      Mapped[str] = mapped_column(String(20), nullable=False)

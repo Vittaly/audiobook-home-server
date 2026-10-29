@@ -5,9 +5,9 @@
   1. Получает список активных торрентов из клиента.
   2. Для каждого находит Release (карточка раздачи).
   3. Если у раздачи ещё нет глав (ни у одной книги) и метаданные готовы —
-     создаёт книги и главы (ingest_release).
+     создаёт книги и главы (release.ingest_torrent).
   4. Актуализирует раздачу через actualize_release(): догоняет статусы глав
-     и приводит приоритеты к целевой двухфазной схеме.
+     (book.sync_chapters) и приводит приоритеты к целевой двухфазной схеме.
   5. Помечает раздачи, чьи торренты пропали из клиента, как announced
      (статусы книг пересчитываются, карточка агрегируется).
 
@@ -30,10 +30,11 @@ from sqlalchemy.orm import Session
 
 from app.catalog.book_covers import search_book_cover_detached
 from app.catalog.covers import CoverService
-from app.catalog.ingest import ingest_release
 from app.config import settings
 from app.db.models import Book, Chapter, Release
 from app.db.session import session_scope
+from app.scraper.rutor import RutorSource
+from app.scraper.types import TorrentSource
 from app.torrents import manager
 from app.torrents.utils import is_image
 
@@ -41,8 +42,11 @@ log = logging.getLogger(__name__)
 
 _AUDIO_EXTS = {".mp3", ".m4a", ".m4b", ".flac", ".ogg", ".opus"}
 
-# id книг, для которых уже запущен фоновый онлайн-поиск обложки
-_search_in_flight: set[int] = set()
+# book_hash книг, для которых уже запущен фоновый онлайн-поиск обложки
+_search_in_flight: set[str] = set()
+
+# (series_name, volume) — уникальные пары, для которых уже запущен поиск пиров
+_peer_in_flight: set[tuple[str, int]] = set()
 
 # последний применённый приоритет по раздаче: hash -> (file_index, фаза2).
 # Защита от повторного дёргания торрент-клиента на каждом проходе, пока
@@ -69,12 +73,14 @@ async def poll_downloads(covers: CoverService) -> dict:
 
     scanned = 0
     updated = 0
-    search_ids: list[int] = []
+    search_ids: list[str] = []
+    peer_tickets: list[tuple[str, int, str, int | None]] = []
 
     for t in active:
         try:
-            result, pending = _process_torrent(t, covers)
+            result, pending, peers = _process_torrent(t, covers)
             search_ids.extend(pending)
+            peer_tickets.extend(peers)
             if result == "scanned":
                 scanned += 1
             elif result == "updated":
@@ -84,11 +90,18 @@ async def poll_downloads(covers: CoverService) -> dict:
                           t.hash[:8])
 
     # фоновый онлайн-поиск обложек книг (не блокирует этот проход)
-    for book_id in search_ids:
-        if book_id in _search_in_flight:
+    for book_hash in search_ids:
+        if book_hash in _search_in_flight:
             continue
-        _search_in_flight.add(book_id)
-        asyncio.create_task(_run_book_cover_search(covers, book_id))
+        _search_in_flight.add(book_hash)
+        asyncio.create_task(_run_book_cover_search(covers, book_hash))
+
+    # поиск недостающих книг серии (не блокирует этот проход)
+    if peer_tickets:
+        source = RutorSource()
+        sem = asyncio.Semaphore(max(1, settings.SCRAPE_DETAILS_CONCURRENCY))
+        asyncio.create_task(_ensure_series_peers(
+            source, covers, sem, peer_tickets))
 
     missing = _handle_missing(active_hashes)
 
@@ -98,6 +111,7 @@ async def poll_downloads(covers: CoverService) -> dict:
         "updated": updated,
         "missing": missing,
         "cover_search_scheduled": len(search_ids),
+        "peer_search_scheduled": len(peer_tickets),
     }
 
 
@@ -105,11 +119,14 @@ async def poll_downloads(covers: CoverService) -> dict:
 # ОБРАБОТКА ОДНОГО ТОРРЕНТА
 # ============================================================
 
-def _process_torrent(t, covers: CoverService) -> tuple[str | None, list[int]]:
+def _process_torrent(
+    t, covers: CoverService,
+) -> tuple[str | None, list[str], list[tuple[str, int, str, int | None]]]:
     """
     Обрабатывает один торрент.
 
-    Возвращает (результат, список id книг, которым нужен онлайн-поиск обложки).
+    Возвращает (результат, список book_hash для поиска обложки,
+    список (series_name, volume, author, year) для поиска пиров серии).
     """
     with session_scope() as db:
         release = db.execute(
@@ -117,34 +134,34 @@ def _process_torrent(t, covers: CoverService) -> tuple[str | None, list[int]]:
         ).scalar_one_or_none()
         if release is None:
             log.debug(">>> poller: торрент %s не наш, пропуск", t.hash[:8])
-            return None, []
+            return None, [], []
 
         # ---------- главы ещё не созданы ----------
         if not _release_has_chapters(release):
             files = manager.get_files(t.hash)
             if not files:
-                return None, []
+                return None, [], []
 
-            created = ingest_release(
-                release_id=release.id,
-                files=_prepare_files(files),
-                torrent_name=t.name,
-                covers=covers,
-            )
+            created = release.ingest_torrent(
+                db, _prepare_files(files), t.name, covers)
 
             if not created:
-                return None, []
+                return None, [], []
 
             log.info("release=%s: создано %d глав из торрента %s",
                      release.id, created, t.hash[:8])
             search_ids = [
-                b.id for b in release.books
-                if _book_needs_online_cover(b)
+                b.book_hash for b in release.books
+                if b.needs_online_cover
             ]
+
+            # --- поиск недостающих книг серии ---
+            peer_tickets = _collect_peer_tickets(db, release)
+
             # при создании глав все absent — actualize_release сам поставит
             # приоритеты (фаза 1: качается ровно первая глава раздачи)
             actualize_release(db, t.hash, release)
-            return "scanned", search_ids
+            return "scanned", search_ids, peer_tickets
 
         # ---------- главы есть, актуализируем раздачу ----------
         # статусы глав + приоритеты всей раздачи — теми же действиями,
@@ -153,18 +170,18 @@ def _process_torrent(t, covers: CoverService) -> tuple[str | None, list[int]]:
 
         # попутно докачиваем/копируем обложки томов и собираем книги,
         # которым нужен онлайн-поиск обложки
-        search_ids: list[int] = []
+        search_ids: list[str] = []
         for book in release.books:
             if _try_copy_book_cover(book, covers):
                 changed = True
-            if _book_needs_online_cover(book):
-                search_ids.append(book.id)
+            if book.needs_online_cover:
+                search_ids.append(book.book_hash)
 
         if changed:
             log.debug("release=%s: статусы глав обновлены", release.id)
-            return "updated", search_ids
+            return "updated", search_ids, []
 
-        return None, search_ids
+        return None, search_ids, []
 
 
 def _release_has_chapters(release: Release) -> bool:
@@ -205,8 +222,11 @@ def actualize_release(db: Session, torrent_hash: str,
     # ---- 1. Догнать статусы глав ----
     changed = False
     for book in release.books:
-        if _update_chapters(book, files_by_idx):
+        if book.sync_chapters(files_by_idx):
             changed = True
+
+    if changed:
+        release.recompute_status()
 
     # ---- 2. Первая незагруженная глава ПО ВСЕЙ РАЗДАЧЕ ----
     ordered = _ordered_chapters(release)
@@ -239,44 +259,6 @@ def _ordered_chapters(release: Release) -> list[Chapter]:
     for book in sorted(release.books, key=lambda b: b.ordinal):
         result.extend(sorted(book.chapters, key=lambda c: c.ordinal))
     return result
-
-
-# ============================================================
-# ОБНОВЛЕНИЕ СТАТУСОВ
-# ============================================================
-
-def _update_chapters(book: Book, files_by_idx: dict) -> bool:
-    """Догоняет статусы глав книги по данным торрента.
-
-    files_by_idx — {file_index: TorrentFileInfo} по всей раздаче.
-    """
-    changed = False
-
-    for chapter in book.chapters:
-        f = files_by_idx.get(chapter.file_index)
-        if f is None:
-            continue
-
-        progress = float(f.progress)
-
-        if f.is_complete or progress >= 1.0:
-            if chapter.status != "ready":
-                chapter.mark_ready()
-                changed = True
-
-        elif progress > 0:
-            if chapter.status in ("absent", "downloading") or \
-                    abs(chapter.progress - progress) > 0.01:
-                chapter.mark_progress(progress)
-                changed = True
-
-    if changed:
-        book.recompute_status()
-        release = book.release
-        if release is not None:
-            release.recompute_status()
-
-    return changed
 
 
 # ============================================================
@@ -423,55 +405,21 @@ def _try_copy_book_cover(book: Book, covers: CoverService) -> bool:
         ok = covers.cache_from_torrent(book, hint_path)
     except Exception:
         log.exception("book=%s: сбой копирования обложки %s",
-                      book.id, hint_path)
+                      book.book_hash[:12], hint_path)
         return False
 
     if not ok:
         log.warning("book=%s: файл %s не скопирован как обложка",
-                    book.id, hint_path)
+                    book.book_hash[:12], hint_path)
         return False
 
     book.cover_is_temp = False
-    log.info("book=%s: обложка тома скопирована из %s", book.id, hint_path)
+    log.info("book=%s: обложка тома скопирована из %s",
+             book.book_hash[:12], hint_path)
     return True
 
 
-def _book_needs_online_cover(book: Book) -> bool:
-    """
-    Нужен ли книге онлайн-поиск обложки в этом проходе.
-
-    Да, когда у книги временная обложка, нет своей, ещё не исчерпан лимит
-    ретраев, и файл-картинка из торрента либо не заявлен вовсе (нет hint),
-    либо заявлен, но книга уже готова, а файла так и не появилось —
-    значит его нет в раздаче, ищем онлайн.
-
-    Поиск по книге имеет смысл только для многотомных раздач: у однократных
-    нет своей обложки тома в принципе, и их обложкой занимается уровень
-    раздачи (_ensure_cover: трекер → интернет).
-    """
-    if book.cover_cache_path is not None or not book.cover_is_temp:
-        return False
-
-    release = book.release
-    if release is None or len(release.books) <= 1:
-        return False
-
-    if (book.cover_retry_count or 0) >= settings.COVER_RETRY_LIMIT:
-        return False
-
-    if book.cover_path_hint:
-        if book.status != "ready":
-            # ждём, пока файл картинки докачается вместе с главой
-            return False
-        hint_path = settings.downloads_dir / book.cover_path_hint
-        if hint_path.exists():
-            return False
-        # книга готова, а файла картинки нет — его нет в раздаче
-
-    return True
-
-
-async def _run_book_cover_search(covers: CoverService, book_id: int) -> None:
+async def _run_book_cover_search(covers: CoverService, book_hash: str) -> None:
     """
     Фоновая задача онлайн-поиска обложки книги.
 
@@ -480,8 +428,125 @@ async def _run_book_cover_search(covers: CoverService, book_id: int) -> None:
     блокировки базы — иначе поллер/API падают с "database is locked".
     """
     try:
-        await search_book_cover_detached(covers, book_id)
+        await search_book_cover_detached(covers, book_hash)
     except Exception:
-        log.exception("book=%s: фоновая ошибка поиска обложки", book_id)
+        log.exception("book=%s: фоновая ошибка поиска обложки", book_hash[:12])
     finally:
-        _search_in_flight.discard(book_id)
+        _search_in_flight.discard(book_hash)
+
+
+# ============================================================
+# ПОИСК НЕДОСТАЮЩИХ КНИГ СЕРИИ
+# ============================================================
+
+
+def _collect_peer_tickets(
+    db: Session, release: Release,
+) -> list[tuple[str, int, str, int | None]]:
+    """
+    Собирает список недостающих книг серии (peer_tickets) из только что
+    обработанной раздачи.
+
+    Для каждой книги раздачи, у которой определена серия (series_id не None),
+    вызывает book.find_missing_peers(db) и собирает тикеты
+    (series_name, volume, author, year).
+
+    Уже летящие в фоне тикеты (в _peer_in_flight) пропускаются.
+    """
+    tickets: list[tuple[str, int, str, int | None]] = []
+
+    for book in release.books:
+        if book.series_id is None or book.series_order is None:
+            continue
+
+        missing = book.find_missing_peers(db)
+        if not missing:
+            continue
+
+        author = release.release_author or ""
+        year = release.year
+
+        for series_name, volume in missing:
+            key = (series_name, volume)
+            if key in _peer_in_flight:
+                continue
+            _peer_in_flight.add(key)
+            tickets.append((series_name, volume, author, year))
+
+    return tickets
+
+
+async def _ensure_series_peers(
+    source: TorrentSource,
+    covers: CoverService,
+    sem: asyncio.Semaphore,
+    peer_tickets: list[tuple[str, int, str, int | None]],
+) -> None:
+    """
+    Фоновая задача: для каждого тикета (series_name, volume, author, year)
+    ищет на трекере раздачу и создаёт карточку (Release) через _process_item.
+
+    Использует тот же конвейер, что и обычная обработка поисковой выдачи:
+      1. fetch_search_page → список сырых записей
+      2. нормализация → SearchItem
+      3. _process_item → upsert карточки, детали, обложка
+    """
+    from app.catalog.ingest import _process_item
+    from app.scraper.types import SearchItem
+
+    for series_name, volume, author, year in peer_tickets:
+        query = " ".join(filter(None, [author, series_name, str(volume)]))
+
+        # --- 1. Поиск на трекере ---
+        try:
+            raw_results = await source.fetch_search_page(1, query=query)
+        except Exception:
+            log.exception(">>> poller: ошибка поиска серии %r том %d",
+                          series_name, volume)
+            continue
+
+        if not raw_results:
+            log.info(">>> poller: серия %r том %d — ничего не найдено",
+                     series_name, volume)
+            continue
+
+        # --- 2. Нормализация и выбор лучшего совпадения ---
+        matched: SearchItem | None = None
+
+        for raw in raw_results:
+            if not isinstance(raw, dict):
+                continue
+            item = SearchItem(
+                torrent_hash=str(raw.get("torrent_hash", "")),
+                title=str(raw.get("title", "")),
+                magnet=str(raw.get("magnet", "")),
+                content_type=str(raw.get("content_type", "audio")),
+                source_url=str(raw.get("source_url", "")),
+                size_bytes=raw.get("size_bytes"),
+                books_hint=raw.get("books_hint"),
+                author=raw.get("author"),
+                narrator=raw.get("narrator"),
+                title_raw=raw.get("title_raw"),
+                added_at=raw.get("added_at"),
+                year=raw.get("year"),
+            )
+            if item.content_type != "audio":
+                continue
+            matched = item
+            if not item.title:
+                continue
+            # приоритет: номер тома присутствует в заголовке
+            if str(volume) in item.title:
+                break
+
+        if matched is None:
+            log.info(">>> poller: серия %r том %d — подходящих аудио нет",
+                     series_name, volume)
+            continue
+
+        # --- 3. Создание карточки раздачи ---
+        try:
+            await _process_item(source, covers, sem, matched)
+        except Exception:
+            log.exception(">>> poller: сбой создания карточки для %s",
+                          matched.title)

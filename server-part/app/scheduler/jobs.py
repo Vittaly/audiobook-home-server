@@ -7,8 +7,7 @@
                      (создание глав, обновление прогресса,
                      обработка удалённых торрентов).
 
-Каждая задача обёрнута в _logged: логирует старт, финиш, длительность
-и полный трейс при ошибке. Исключение в задаче не убивает планировщик.
+Каждая задача — экземпляр Job (app.scheduler.base).
 """
 
 import asyncio
@@ -19,46 +18,12 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.catalog.covers import CoverService
-from app.catalog.ingest import sync_catalog
+from app.catalog.ingest import CatalogScanJob
 from app.config import settings
+from app.scraper.rutor import RutorSource
 from app.torrents.poller import poll_downloads
 
 log = logging.getLogger(__name__)
-
-
-# ============================================================
-# ОБЁРТКА ЗАДАЧ
-# ============================================================
-
-def _logged(name):
-    """
-    Декоратор: логирует старт/финиш/ошибку задачи и её длительность.
-    Не даёт исключению убить планировщик.
-    """
-    def wrap(fn):
-        async def inner(*args, **kwargs):
-            t0 = datetime.now(timezone.utc)
-            log.info(">>> task %s: СТАРТ", name)
-            try:
-                result = await fn(*args, **kwargs)
-                dt = (datetime.now(timezone.utc) - t0).total_seconds()
-                log.info(">>> task %s: ГОТОВО (%s) за %.1f сек",
-                         name, result, dt)
-                return result
-            except asyncio.CancelledError:
-                # Нормальная отмена: остановка планировщика/сервера или
-                # таймаут внутри задачи (asyncio.wait_for в sync_catalog).
-                # CancelledError — это BaseException, обычный `except Exception`
-                # его не ловит, и APScheduler логирует трейс как ошибку.
-                # Проглатываем: отмена задачи — не сбой.
-                dt = (datetime.now(timezone.utc) - t0).total_seconds()
-                log.info(">>> task %s: ОТМЕНЕНА за %.1f сек", name, dt)
-                return None
-            except Exception:
-                dt = (datetime.now(timezone.utc) - t0).total_seconds()
-                log.exception(">>> task %s: ОШИБКА за %.1f сек", name, dt)
-        return inner
-    return wrap
 
 
 # ============================================================
@@ -88,10 +53,11 @@ def build_scheduler(covers: CoverService) -> AsyncIOScheduler:
         scrape_first_run = None
         log.info(">>> build_scheduler: sync_catalog стартует по триггеру")
 
+    scan_job = CatalogScanJob(RutorSource(), covers)
+
     scheduler.add_job(
-        _logged("sync_catalog")(sync_catalog),
+        scan_job.execute,
         trigger=IntervalTrigger(hours=settings.SCRAPE_INTERVAL_HOURS),
-        args=[covers],
         id="sync_catalog",
         max_instances=1,
         coalesce=True,
@@ -108,7 +74,7 @@ def build_scheduler(covers: CoverService) -> AsyncIOScheduler:
              poll_first_run)
 
     scheduler.add_job(
-        _logged("poll_downloads")(poll_downloads),
+        poll_downloads,
         trigger=IntervalTrigger(seconds=settings.TRANSMISSION_POLL_SEC),
         args=[covers],
         id="poll_downloads",

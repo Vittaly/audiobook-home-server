@@ -1,11 +1,12 @@
 """
 Эндпоинты управления загрузкой книги.
 
-Тонкий слой: HTTP-запрос → вызов доменной операции в catalog.download
+Тонкий слой: HTTP-запрос → Catalog.get_book → метод Book
+(start_download / stop_download / remove_download)
 → маппинг error_code на HTTP-код → JSON.
 
 Никаких деталей торрент-клиента, файловой системы или БД —
-это всё в catalog.download.
+это всё в моделях Book/Release и торрент-менеджере.
 """
 from __future__ import annotations
 
@@ -16,8 +17,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.schemas import PriorityRequest
-from app.catalog import download as download_domain
 from app.catalog import service
+from app.catalog.catalog import Catalog
+from app.catalog.types import DownloadResult
 from app.db.session import get_db
 
 log = logging.getLogger(__name__)
@@ -35,29 +37,37 @@ _ERROR_TO_HTTP = {
 }
 
 
-def _raise_for(result: download_domain.DownloadResult) -> None:
+def _raise_for(result: DownloadResult) -> None:
     if result.success:
         return
     code = _ERROR_TO_HTTP.get(result.error_code or "", 500)
     raise HTTPException(code, result.error_message or "download failed")
 
 
+def _get_book_or_404(db: Session, book_hash: str):
+    book = Catalog.get_book(db, book_hash)
+    if book is None:
+        raise HTTPException(404, "book not found")
+    return book
+
+
 # ============================================================
-# POST /books/{id}/download
+# POST /books/{book_hash}/download
 # ============================================================
 
-@router.post("/books/{book_id}/download", status_code=202)
+@router.post("/books/{book_hash}/download", status_code=202)
 async def start_download(
-    book_id: int,
+    book_hash: str,
     db: Session = Depends(get_db),
 ):
     """Запускает загрузку книги."""
-    result = await download_domain.start(db, book_id)
+    book = _get_book_or_404(db, book_hash)
+    result = await book.start_download(db)
     _raise_for(result)
 
     return {
         "release_id": result.release_id,
-        "book_id": result.book_id,
+        "book_id": result.book_hash,
         "client_id": result.client_id,
         "status": result.status,
         "save_path": result.save_path,
@@ -72,7 +82,6 @@ async def start_download(
 @router.post("/releases/{release_id}/download", status_code=202)
 async def start_release_download(
     release_id: int,
-    book_id: int | None = None,
     db: Session = Depends(get_db),
 ):
     """Запускает загрузку всей раздачи.
@@ -81,83 +90,91 @@ async def start_release_download(
     заглушку) — торрент стартует на уровне карточки раздачи. Клиент
     поллит каталог и берёт первую книгу по порядку по факту появления.
     """
-    result = await download_domain.start_release(db, release_id, book_id=book_id)
-    _raise_for(result)
+    release = service.get_release(db, release_id)
+    if release is None:
+        raise HTTPException(404, "release not found")
+
+    client_id = await release.start_download()
+    if client_id is None:
+        raise HTTPException(500, "не удалось добавить раздачу в торрент-клиент")
+    db.commit()
 
     return {
-        "release_id": result.release_id,
-        "book_id": result.book_id,
-        "client_id": result.client_id,
-        "status": result.status,
-        "save_path": result.save_path,
+        "release_id": release.id,
+        "book_id": None,
+        "client_id": client_id,
+        "status": release.status,
+        "save_path": release.save_path,
         "message": "download started",
     }
 
 
 # ============================================================
-# DELETE /books/{id}/download
+# DELETE /books/{book_hash}/download
 # ============================================================
 
-@router.delete("/books/{id}/download")
+@router.delete("/books/{book_hash}/download")
 def stop_download(
-    book_id: int,
+    book_hash: str,
     delete_files: bool = False,
     db: Session = Depends(get_db),
 ):
     """Останавливает загрузку."""
-    result = download_domain.stop(db, book_id, delete_files=delete_files)
+    book = _get_book_or_404(db, book_hash)
+    result = book.stop_download(db, delete_files=delete_files)
     _raise_for(result)
 
     return {
-        "book_id": result.book_id,
+        "book_id": result.book_hash,
         "status": result.status,
         "message": "download stopped",
     }
 
 
 # ============================================================
-# GET /books/{id}/status
+# GET /books/{book_hash}/status
 # ============================================================
 
-@router.get("/books/{book_id}/status")
+@router.get("/books/{book_hash}/status")
 def download_status(
-    book_id: int,
+    book_hash: str,
     db: Session = Depends(get_db),
 ):
     """Прогресс загрузки. Данные из БД и клиента — собирает сервис."""
-    data = service.get_download_status(db, book_id)
+    data = service.get_download_status(db, book_hash)
     if not data:
         raise HTTPException(404, "book not found")
     return data
 
 
 # ============================================================
-# DELETE /books/{id}
+# DELETE /books/{book_hash}
 # ============================================================
 
-@router.delete("/books/{id}")
+@router.delete("/books/{book_hash}")
 def delete_book(
-    book_id: int,
+    book_hash: str,
     db: Session = Depends(get_db),
 ):
     """Удаляет торрент с файлами, метаданные книги сохраняются."""
-    result = download_domain.remove(db, book_id)
+    book = _get_book_or_404(db, book_hash)
+    result = book.remove_download(db)
     _raise_for(result)
 
     return {
-        "book_id": result.book_id,
+        "book_id": result.book_hash,
         "status": result.status,
         "message": "book deleted",
     }
 
 
 # ============================================================
-# POST /books/{id}/priority
+# POST /books/{book_hash}/priority
 # ============================================================
 
-@router.post("/books/{book_id}/priority")
+@router.post("/books/{book_hash}/priority")
 def set_priority(
-    book_id: int,
+    book_hash: str,
     payload: PriorityRequest,
     db: Session = Depends(get_db),
 ):
@@ -165,9 +182,7 @@ def set_priority(
     Закрепление книги. Пока пишется в БД, дальнейшая логика TTL
     появится позже.
     """
-    book = service.get_book(db, book_id)
-    if book is None:
-        raise HTTPException(404, "book not found")
+    book = _get_book_or_404(db, book_hash)
 
     if book.status not in ("ready", "partial", "downloading"):
         raise HTTPException(
@@ -176,7 +191,7 @@ def set_priority(
     # TODO: book.priority = payload.priority; db.commit()
 
     return {
-        "book_id": book.id,
+        "book_id": book.book_hash,
         "priority": payload.priority,
         "message": "priority saved",
     }

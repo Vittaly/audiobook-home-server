@@ -1,17 +1,8 @@
 """
-Сканирование структуры торрента и создание глав.
+Job: сканирование структуры торрента и создание глав.
 
-После получения метаданных торрента scan_book берёт карточку-раздачу книги
-(book.release), получает список файлов из торрент-клиента и вызывает
-ingest_release: разбиение на книги (app.torrents.structure), создание Book
-с локальным ordinal, глав с локальным ordinal внутри книги, копирование
-обложек томов и глобальное автоопределение серии.
-
-Модель: Release = карточка раздачи (1..N книг), Book = книга (том),
-Chapter привязан к книге (book_id) и раздаче (release_id).
-
-Также здесь живёт update_chapter_from_alert — обновление главы по данным
-торрент-клиента (backlog alert'ов).
+После получения метаданных торрента scan_book открывает сессию,
+получает файлы из торрент-клиента и вызывает release.ingest_torrent().
 """
 from __future__ import annotations
 
@@ -23,7 +14,6 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.catalog.covers import CoverService
-from app.catalog.ingest import ingest_release
 from app.db.models import Book, Chapter
 from app.db.session import session_scope
 from app.torrents import manager
@@ -31,35 +21,32 @@ from app.torrents import manager
 log = logging.getLogger(__name__)
 
 
-def scan_book(book_id: int, covers: CoverService) -> None:
+def scan_book(book_hash: str, covers: CoverService) -> None:
     """
-    После получения метаданных торрента:
-      - берёт карточку-раздачу книги (book.release),
-      - получает список файлов из торрент-клиента,
-      - вызывает ingest_release: разбивает структуру на книги, создаёт
-        книги и главы (локальный ordinal), копирует обложки томов.
+    После получения метаданных торрента получает файлы и вызывает
+    release.ingest_torrent(), который создаёт книги и главы.
     """
     with session_scope() as db:
-        book = db.get(Book, book_id)
+        book = db.get(Book, book_hash)
         if book is None:
             return
 
-        release = book.release
+        release = book.releases[0] if book.releases else None
+        if release is None:
+            log.warning("book=%s: нет раздачи-источника", book_hash[:12])
+            return
+
         files = manager.get_files(release.torrent_hash)
         if not files:
             log.warning("book=%s: нет файлов для раздачи %s",
-                        book_id, release.torrent_hash[:8])
+                        book_hash[:12], release.torrent_hash[:8])
             return
 
         torrent_name = _torrent_root_name(files, release.title)
-        created = ingest_release(
-            release_id=release.id,
-            files=_prepare_files(files),
-            torrent_name=torrent_name,
-            covers=covers,
-        )
+        created = release.ingest_torrent(
+            db, _prepare_files(files), torrent_name, covers)
         log.info("book=%s: создано глав: %d (release=%s)",
-                 book_id, created, release.id)
+                 book_hash[:12], created, release.id)
 
 
 def _torrent_root_name(files, fallback: str) -> str:
@@ -96,9 +83,9 @@ def _prepare_files(files) -> list[dict]:
 # ОБНОВЛЕНИЕ ГЛАВЫ ПО ALERT'У
 # ============================================================
 
-def recompute_book_status(db: Session, book_id: int) -> None:
+def recompute_book_status(db: Session, book_hash: str) -> None:
     """Пересчитывает Book.status по статусам глав."""
-    book = db.get(Book, book_id)
+    book = db.get(Book, book_hash)
     if book is None:
         return
     book.recompute_status()
