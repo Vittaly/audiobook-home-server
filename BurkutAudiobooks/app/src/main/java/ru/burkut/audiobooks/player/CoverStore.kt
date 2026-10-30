@@ -12,10 +12,10 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Локальный кэш обложек книг и раздач.
  *
- * На сервере обложка всегда доступна по URL (`/books/{id}/cover` и
+ * На сервере обложка всегда доступна по URL (`/books/{hash}/cover` и
  * `/releases/{id}/cover`), но плеер должен показывать картинку и в оффлайне.
  * Поэтому, пока сервер доступен, обложка сохраняется в файл рядом с аудио
- * (`filesDir/books/{bookId}/cover.jpg`). Плеер и UI затем отдают Coil локальный
+ * (`filesDir/books/{bookHash}/cover.jpg`). Плеер и UI затем отдают Coil локальный
  * `file://` URI — без обращения к серверу.
  *
  * Хранение — это задача слоя данных (а не плеера или источника): плеер лишь
@@ -27,12 +27,12 @@ class CoverStore(
     private val storage: BookStorage,
 ) {
 
-    /** Ключи (book-N / release-N), обложки которых качаются прямо сейчас. */
+    /** Ключи (book-{hash} / release-N), обложки которых качаются прямо сейчас. */
     private val inflight = ConcurrentHashMap<String, Boolean>()
 
     /** Локальный файл обложки книги, если он уже сохранён. */
-    fun cachedBookCover(bookId: Int): File? =
-        storage.coverFile(bookId).takeIf { it.exists() && it.length() > 0 }
+    fun cachedBookCover(bookHash: String): File? =
+        storage.coverFile(bookHash).takeIf { it.exists() && it.length() > 0 }
 
     /** Локальный файл обложки раздачи, если он уже сохранён. */
     fun cachedReleaseCover(releaseId: Int): File? =
@@ -45,10 +45,10 @@ class CoverStore(
      *        временной обложки (карточки раздачи) на финальную.
      * @return локальный файл, если он есть/получился, иначе null.
      */
-    suspend fun ensureBookCover(bookId: Int, force: Boolean = false): File? {
-        val target = storage.coverFile(bookId)
+    suspend fun ensureBookCover(bookHash: String, force: Boolean = false): File? {
+        val target = storage.coverFile(bookHash)
         if (!force && target.exists() && target.length() > 0) return target
-        return fetch("book-$bookId", target) { apiProvider.get().getCover(bookId) }
+        return fetch("book-$bookHash", target) { apiProvider.get().getCover(bookHash) }
     }
 
     /** Гарантирует наличие локальной обложки раздачи. */

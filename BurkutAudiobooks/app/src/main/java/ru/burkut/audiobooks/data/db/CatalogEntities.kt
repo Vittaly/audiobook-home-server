@@ -35,11 +35,11 @@ data class ReleaseEntity(
     val queuedForDevice: Boolean = false,
 )
 
-/** Книга (том) внутри раздачи. */
+/** Книга (основная сущность каталога). */
 @Entity(tableName = "books")
 data class BookEntity(
-    @PrimaryKey val id: Int,
-    val releaseId: Int,
+    @PrimaryKey val id: String,
+    val releaseId: Int? = null,
     val ordinal: Int,
     val title: String,
     val folder: String? = null,
@@ -48,6 +48,7 @@ data class BookEntity(
     val year: Int? = null,
     val language: String? = null,
     val description: String? = null,
+    val rubrics: String? = null,
     val status: String,
     val chaptersCount: Int = 0,
     val chaptersReady: Int = 0,
@@ -57,7 +58,7 @@ data class BookEntity(
     val coverIsTemp: Boolean = false,
     val addedAt: String,
     val lastAccessed: String? = null,
-    // Серия книги (заполняется из карточки раздачи при загрузке томов).
+    // Серия книги.
     val seriesId: Int? = null,
     val seriesTitle: String? = null,
     val seriesOrder: Int? = null,
@@ -65,13 +66,14 @@ data class BookEntity(
     val localStatus: String = "absent", // absent | downloading | partial | ready
     val downloadedBytes: Long = 0,
     val localTotalBytes: Long = 0,
+    val isProvisional: Boolean = false,
 )
 
 /** Глава книги — серверное + локальное состояние. */
 @Entity(tableName = "chapters")
 data class ChapterEntity(
     @PrimaryKey val id: Int,
-    val bookId: Int,
+    val bookId: String,
     val ordinal: Int,
     val title: String? = null,
     val durationSec: Int? = null,

@@ -30,14 +30,12 @@ data class BookDetailUiState(
     val serverDownload: DownloadStatusOut? = null,
     /** Локальный статус книги на устройстве: absent | downloading | partial | ready. */
     val deviceStatus: String = "absent",
-    /** Раздача поставлена в фоновую докачку на устройство. */
-    val queued: Boolean = false,
     val progress: ProgressEntity? = null,
 )
 
 class BookDetailViewModel(
     application: Application,
-    private val bookId: Int,
+    private val bookHash: String,
 ) : ViewModel() {
 
     private val app: App = application as App
@@ -52,19 +50,14 @@ class BookDetailViewModel(
     init {
         // Книга из локального кэша (оффлайн-first).
         viewModelScope.launch {
-            val book = repository.getBookEntity(bookId)
+            val book = repository.getBookEntity(bookHash)
             _state.update { it.copy(book = book, loading = book == null) }
-            if (book != null) {
-                // Флаг «в очереди» хранится на раздаче.
-                val rel = repository.getReleaseEntity(book.releaseId)
-                _state.update { it.copy(queued = rel?.queuedForDevice ?: false) }
-            }
             refresh()
         }
 
         // Главы из кэша + статус устройства пересчитываем по ним.
         viewModelScope.launch {
-            repository.observeChapters(bookId).collect { chapters ->
+            repository.observeChapters(bookHash).collect { chapters ->
                 _state.update { it.copy(chapters = chapters, deviceStatus = deviceStatusOf(chapters)) }
             }
         }
@@ -82,8 +75,8 @@ class BookDetailViewModel(
     /** Полное обновление: книга + прогресс + серверный статус. */
     fun refresh() {
         viewModelScope.launch {
-            val book = repository.getBookEntity(bookId)
-            val progress = repository.getProgress(bookId)
+            val book = repository.getBookEntity(bookHash)
+            val progress = repository.getProgress(bookHash)
             _state.update { it.copy(book = book, loading = false, error = null, progress = progress) }
             refreshServerStatus()
         }
@@ -98,7 +91,7 @@ class BookDetailViewModel(
                 return@launch
             }
             // Свежая карточка книги с сервера (статус загрузки сервером).
-            val detail = repository.getBookDetail(bookId, online)
+            val detail = repository.getBookDetail(bookHash, online)
             if (detail != null) {
                 _state.update { st -> st.copy(serverStatus = detail.status) }
             }
@@ -117,7 +110,7 @@ class BookDetailViewModel(
         pollJob = viewModelScope.launch {
             while (true) {
                 val st = try {
-                    repository.getDownloadStatus(bookId)
+                    repository.getDownloadStatus(bookHash)
                 } catch (e: Exception) {
                     null
                 }
@@ -139,19 +132,19 @@ class BookDetailViewModel(
         pollJob = null
     }
 
-    /** Удалить локальные файлы книги с устройства (сам торрент на сервере не трогаем). */
+    /** Удалить локальные файлы книги с устройства. */
     fun deleteFromDevice() {
         viewModelScope.launch {
             val book = _state.value.book ?: return@launch
             // Удаляем файлы с устройства.
-            runCatching { storage.bookDir(bookId).deleteRecursively() }
+            runCatching { storage.bookDir(bookHash).deleteRecursively() }
             // Сбрасываем локальный статус глав и книги.
-            val chapters = repository.getChapters(bookId)
+            val chapters = repository.getChapters(bookHash)
             for (ch in chapters) {
                 repository.updateChapterLocal(ch.id, "absent", 0)
             }
-            repository.updateBookLocal(bookId, "absent", 0, book.sizeBytes ?: 0)
-            repository.clearProgress(bookId)
+            repository.updateBookLocal(bookHash, "absent", 0, book.sizeBytes ?: 0)
+            repository.clearProgress(bookHash)
             refresh()
         }
     }

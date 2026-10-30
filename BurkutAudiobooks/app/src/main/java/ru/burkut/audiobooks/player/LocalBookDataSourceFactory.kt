@@ -14,7 +14,7 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * ExoPlayer вызывает [DataSource.Factory.createDataSource] без параметров —
  * URI появляется только в [DataSource.open]. Поэтому файл резолвится внутри
- * [DataSource.open]: по пути из URI (`/books/{bookId}/{ordinal}.mp3[.part]`)
+ * [DataSource.open]: по пути из URI (`/books/{bookHash}/{ordinal}.mp3[.part]`)
  * берём актуальный файл через [resolveFile] (который учитывает, что .part
  * мог уже превратиться в .mp3) и подставляем его в DataSpec.
  *
@@ -23,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
  */
 @UnstableApi
 class LocalBookDataSourceFactory(
-    private val resolveFile: (bookId: Int, ordinal: Int) -> File,
+    private val resolveFile: (bookHash: String, ordinal: Int) -> File,
     /** Доступен ли сервер: оффлайн источник не ждёт появления файла, а падает сразу. */
     private val isOnline: () -> Boolean = { true },
 ) : DataSource.Factory {
@@ -31,8 +31,8 @@ class LocalBookDataSourceFactory(
     private val targetLengths = ConcurrentHashMap<String, Long>()
 
     /** Регистрирует целевую длину главы (для растущего .part). */
-    fun setTargetLength(bookId: Int, ordinal: Int, sizeBytes: Long) {
-        if (sizeBytes > 0) targetLengths[key(bookId, ordinal)] = sizeBytes
+    fun setTargetLength(bookHash: String, ordinal: Int, sizeBytes: Long) {
+        if (sizeBytes > 0) targetLengths[key(bookHash, ordinal)] = sizeBytes
     }
 
     override fun createDataSource(): DataSource = object : DataSource {
@@ -44,8 +44,8 @@ class LocalBookDataSourceFactory(
 
         override fun open(dataSpec: DataSpec): Long {
             val parsed = parseUri(dataSpec.uri.path) ?: return local.open(dataSpec)
-            val (bookId, ordinal) = parsed
-            val file = resolveFile(bookId, ordinal)
+            val (bookHash, ordinal) = parsed
+            val file = resolveFile(bookHash, ordinal)
             // Источник сам решает, доступна ли глава: если файла нет и сервер
             // оффлайн — ждать нечего, падаем сразу, а не висим 30 секунд в
             // GrowingFileDataSource на несуществующем .part.
@@ -53,7 +53,7 @@ class LocalBookDataSourceFactory(
                 throw IOException("Глава недоступна локально, сервер оффлайн: ${file.path}")
             }
             val isPart = file.path.endsWith(".part")
-            val target = targetLengths[key(bookId, ordinal)] ?: -1L
+            val target = targetLengths[key(bookHash, ordinal)] ?: -1L
             val length = if (isPart && target > 0) target else C.LENGTH_UNSET.toLong()
             val adjusted = dataSpec.buildUpon()
                 .setUri(android.net.Uri.fromFile(file))
@@ -70,16 +70,16 @@ class LocalBookDataSourceFactory(
         override fun close() = local.close()
     }
 
-    /** Возвращает (bookId, ordinal) из пути `/books/{id}/{ordinal}.mp3[.part]`. */
-    private fun parseUri(path: String?): Pair<Int, Int>? {
+    /** Возвращает (bookHash, ordinal) из пути `/books/{hash}/{ordinal}.mp3[.part]`. */
+    private fun parseUri(path: String?): Pair<String, Int>? {
         if (path == null) return null
-        val m = Regex("/books/(\\d+)/(\\d+)\\.mp3(?:\\..*)?$").matchEntire(path) ?: return null
-        val bookId = m.groups[1]?.value?.toIntOrNull() ?: return null
+        val m = Regex("/books/([a-f0-9]+)/(\\d+)\\.mp3(?:\\..*)?$").matchEntire(path) ?: return null
+        val bookHash = m.groups[1]?.value ?: return null
         val ordinal = m.groups[2]?.value?.toIntOrNull() ?: return null
-        return bookId to ordinal
+        return bookHash to ordinal
     }
 
     private companion object {
-        fun key(bookId: Int, ordinal: Int): String = "$bookId:$ordinal"
+        fun key(bookHash: String, ordinal: Int): String = "$bookHash:$ordinal"
     }
 }

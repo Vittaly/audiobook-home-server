@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -19,9 +20,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -46,18 +49,21 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
-import ru.burkut.audiobooks.data.db.ReleaseEntity
+import ru.burkut.audiobooks.data.db.BookEntity
+import ru.burkut.audiobooks.player.PlayRequestUiState
+import ru.burkut.audiobooks.player.PlayerViewModel
 import ru.burkut.audiobooks.ui.appInstance
 import ru.burkut.audiobooks.ui.theme.serverOnlineColor
-import ru.burkut.audiobooks.ui.util.formatReleaseDate
 import ru.burkut.audiobooks.ui.util.formatSeconds
 import ru.burkut.audiobooks.ui.viewModelFactoryOf
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CatalogScreen(
-    onOpenRelease: (Int) -> Unit,
+    onOpenBook: (String) -> Unit,
+    onPlayBook: (String) -> Unit,
     onOpenSettings: () -> Unit,
+    playerVm: PlayerViewModel,
     vm: CatalogViewModel = viewModel(
         factory = viewModelFactoryOf { CatalogViewModel(appInstance()) }
     ),
@@ -65,11 +71,12 @@ fun CatalogScreen(
     val state by vm.state.collectAsState()
     val isLoading by vm.isLoading.collectAsState()
     val isServerOnline by vm.isServerOnline.collectAsState()
+    val playRequest by playerVm.playRequest.collectAsState()
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Раздачи") },
+                title = { Text("Книги") },
                 actions = {
                     // Индикатор доступа к серверу без надписи: яркий зелёный круг,
                     // когда сервер доступен; в автономном режиме — ничего.
@@ -123,14 +130,13 @@ fun CatalogScreen(
                 onReset = vm::resetFilters,
             )
 
-            val hasAnyReleases = state.totalCount > 0
-            val shown = state.releases
-
             LazyColumn(modifier = Modifier.fillMaxSize()) {
-                items(shown, key = { it.id }) { release ->
-                    ReleaseCard(
-                        release = release,
-                        onClick = { onOpenRelease(release.id) },
+                items(state.books, key = { it.id }) { book ->
+                    BookCard(
+                        book = book,
+                        playRequest = playRequest,
+                        onClick = { onOpenBook(book.id) },
+                        onPlay = { onPlayBook(book.id) },
                     )
                 }
                 if (isLoading) {
@@ -143,14 +149,14 @@ fun CatalogScreen(
                         }
                     }
                 }
-                if (shown.isEmpty() && !isLoading) {
+                if (state.books.isEmpty() && !isLoading) {
                     item {
                         Box(
                             modifier = Modifier.fillMaxWidth().padding(32.dp),
                             contentAlignment = Alignment.Center,
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                if (hasAnyReleases) {
+                                if (state.totalCount > 0) {
                                     // Каталог не пуст — отфильтровано всё.
                                     Text("Ничего не найдено")
                                     Spacer(Modifier.height(8.dp))
@@ -240,7 +246,7 @@ private fun CatalogFiltersBar(
             }
         }
 
-        // Фильтр по сериям (доступны для раздач, чьи тома уже в кэше).
+        // Фильтр по сериям (доступны для книг, чьи тома уже в кэше).
         if (availableSeries.isNotEmpty()) {
             Text(
                 "Серии",
@@ -272,53 +278,99 @@ private fun CatalogFiltersBar(
 }
 
 @Composable
-private fun ReleaseCard(
-    release: ReleaseEntity,
+private fun BookCard(
+    book: BookEntity,
+    playRequest: PlayRequestUiState,
     onClick: () -> Unit,
+    onPlay: () -> Unit,
 ) {
+    val waitingForThis = playRequest.requestedBookHash == book.id && playRequest.waiting
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 6.dp)
-            .clickable(onClick = onClick),
+            .when(!waitingForThis) { clickable(onClick = onClick) },
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(12.dp),
-        ) {
-            AsyncImage(
-                model = release.coverUrl,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.size(72.dp),
-            )
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = 12.dp),
-            ) {
-                Text(
-                    release.title,
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 2,
-                )
-                val meta = buildList {
-                    release.author?.let { add(it) }
-                    // Дата релиза с трекера — основная дата каталога.
-                    formatReleaseDate(release.releasedAt)?.let { add(it) }
-                    // Год написания/издания книги — дополнительная информация.
-                    release.year?.let { add("$it г.") }
-                    release.totalDurationSec?.let { add(formatSeconds(it)) }
-                    add("Томов: ${release.booksCount}")
-                }.joinToString(" · ")
-                if (meta.isNotEmpty()) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        meta,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        when {
+            // Ожидание готовности — оверлей поверх карточки.
+            waitingForThis -> {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(12.dp),
+                ) {
+                    AsyncImage(
+                        model = book.coverUrl,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.size(48.dp),
                     )
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(start = 8.dp),
+                    ) {
+                        Text(book.title, maxLines = 1)
+                        Spacer(Modifier.height(4.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                playRequest.status ?: "Ожидание готовности…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Нормальная карточка книги.
+            else -> {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(12.dp),
+                ) {
+                    AsyncImage(
+                        model = book.coverUrl,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.size(72.dp),
+                    )
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(start = 12.dp),
+                    ) {
+                        Text(
+                            book.title,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 2,
+                        )
+                        val meta = buildList {
+                            if (book.ordinal > 0) add("Том ${book.ordinal}")
+                            book.author?.let { add(it) }
+                            book.narrator?.let { add("Читает: $it") }
+                            book.totalDurationSec?.let { add(formatSeconds(it)) }
+                        }.joinToString(" · ")
+                        if (meta.isNotEmpty()) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                meta,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.End) {
+                            Button(onClick = onPlay) {
+                                Icon(Icons.Default.PlayArrow, contentDescription = null)
+                                Spacer(Modifier.size(4.dp))
+                                Text("Слушать")
+                            }
+                        }
+                    }
                 }
             }
         }

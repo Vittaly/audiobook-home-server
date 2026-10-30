@@ -9,11 +9,11 @@ import androidx.room.Query
 interface PlaybackDao {
 
     @Query("SELECT * FROM playback_progress WHERE bookId = :bookId")
-    suspend fun getProgress(bookId: Int): ProgressEntity?
+    suspend fun getProgress(bookId: String): ProgressEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: ProgressEntity)
 
     @Query("DELETE FROM playback_progress WHERE bookId = :bookId")
-    suspend fun delete(bookId: Int)
+    suspend fun delete(bookId: String)
 }

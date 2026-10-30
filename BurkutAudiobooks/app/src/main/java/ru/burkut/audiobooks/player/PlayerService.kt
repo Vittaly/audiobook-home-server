@@ -109,14 +109,14 @@ class PlayerService : MediaSessionService() {
     companion object {
         private const val SAVE_INTERVAL_MS = 10_000L
 
-        /** mediaId формата "bookId:chapterOrdinal". */
-        fun parseMediaId(mediaId: String?): Pair<Int, Int>? {
+        /** mediaId формата "bookHash:chapterOrdinal". */
+        fun parseMediaId(mediaId: String?): Pair<String, Int>? {
             if (mediaId == null) return null
             val parts = mediaId.split(":")
             if (parts.size != 2) return null
-            val bookId = parts[0].toIntOrNull()
-            val chapterOrdinal = parts[1].toIntOrNull()
-            return if (bookId != null && chapterOrdinal != null) bookId to chapterOrdinal else null
+            val bookHash = parts[0]
+            val chapterOrdinal = parts[1].toIntOrNull() ?: return null
+            return bookHash to chapterOrdinal
         }
     }
 }

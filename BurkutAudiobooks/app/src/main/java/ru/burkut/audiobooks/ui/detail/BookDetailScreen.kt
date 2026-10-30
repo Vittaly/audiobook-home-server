@@ -53,6 +53,8 @@ import coil.compose.AsyncImage
 import ru.burkut.audiobooks.R
 import ru.burkut.audiobooks.data.api.BookStatus
 import ru.burkut.audiobooks.data.db.BookEntity
+import ru.burkut.audiobooks.player.PlayRequestUiState
+import ru.burkut.audiobooks.player.PlayerViewModel
 import ru.burkut.audiobooks.player.absoluteUrl
 import ru.burkut.audiobooks.ui.appInstance
 import ru.burkut.audiobooks.ui.theme.serverOnlineColor
@@ -65,15 +67,17 @@ import ru.burkut.audiobooks.ui.viewModelFactoryOf
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BookDetailScreen(
-    bookId: Int,
+    bookHash: String,
     onBack: () -> Unit,
-    onPlay: (Int) -> Unit,
+    onPlay: (String) -> Unit,
+    playerVm: PlayerViewModel,
     vm: BookDetailViewModel = viewModel(
-        key = "book-$bookId",
-        factory = viewModelFactoryOf { BookDetailViewModel(appInstance(), bookId) },
+        key = "book-$bookHash",
+        factory = viewModelFactoryOf { BookDetailViewModel(appInstance(), bookHash) },
     ),
 ) {
     val state by vm.state.collectAsState()
+    val playRequest by playerVm.playRequest.collectAsState()
     val baseUrl = rememberBaseUrl()
     var confirmDelete by remember { mutableStateOf(false) }
 
@@ -121,13 +125,40 @@ fun BookDetailScreen(
             }
 
             else -> {
-                BookDetailContent(
-                    state = state,
-                    baseUrl = baseUrl,
-                    padding = padding,
-                    onPlay = { onPlay(state.book!!.id) },
-                    onDelete = { confirmDelete = true },
-                )
+                // Если книга запрошена для воспроизведения и ещё не готова — оверлей ожидания.
+                val waitingForThis = playRequest.requestedBookHash == bookHash && playRequest.waiting
+
+                when {
+                    waitingForThis -> {
+                        Box(
+                            modifier = Modifier.fillMaxSize().padding(padding),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator()
+                                Text(
+                                    playRequest.status ?: "Ожидание готовности…",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.padding(top = 8.dp),
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                TextButton(onClick = { playerVm.cancelPlayRequest() }) {
+                                    Text("Отмена")
+                                }
+                            }
+                        }
+                    }
+
+                    else -> {
+                        BookDetailContent(
+                            state = state,
+                            baseUrl = baseUrl,
+                            padding = padding,
+                            onPlay = { onPlay(bookHash) },
+                            onDelete = { confirmDelete = true },
+                        )
+                    }
+                }
             }
         }
     }
@@ -217,23 +248,6 @@ private fun BookDetailContent(
         // ---------- Индикатор доступности сервера ----------
         item {
             ServerStatusRow(online = online)
-        }
-
-        // ---------- Оффлайн-подсказка (книга в очереди, сервера нет) ----------
-        if (state.queued && !online) {
-            item {
-                Surface(
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(
-                        "Сервер не доступен, загрузка будет выполнена при появлении подключения",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                        modifier = Modifier.padding(10.dp),
-                    )
-                }
-            }
         }
 
         // ---------- Статус загрузки на устройстве ----------

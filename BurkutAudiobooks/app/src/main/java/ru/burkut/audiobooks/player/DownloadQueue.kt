@@ -30,7 +30,7 @@ data class ChapterDownloadSpec(
 
 /** Одна задача в очереди — глава, которую надо скачать. */
 data class DownloadTask(
-    val bookId: Int,
+    val bookHash: String,
     val chapterId: Int,
     val ordinal: Int,
     val sizeBytes: Long,
@@ -40,7 +40,7 @@ data class DownloadTask(
 /** Состояние очереди загрузки. */
 data class DownloadQueueState(
     val isActive: Boolean = false,
-    val currentBookId: Int? = null,
+    val currentBookHash: String? = null,
     val currentChapterOrdinal: Int? = null,
     val downloadedBytes: Long = 0,
     val totalBytes: Long = 0,
@@ -99,7 +99,7 @@ class DownloadQueue(
 
     /** Книга, открытая сейчас в полноэкранном плеере (null — плеер закрыт). */
     @Volatile
-    private var playerBookId: Int? = null
+    private var playerBookHash: String? = null
 
     /** Защита пересборки очередей (воркер не должен видеть «дыры»). */
     private val queueLock = Any()
@@ -111,8 +111,8 @@ class DownloadQueue(
     private var serverAvailable = false
     private var worker: Job? = null
 
-    private val _onBookReady = MutableStateFlow<Pair<Int, String>?>(null)
-    val onBookReady: StateFlow<Pair<Int, String>?> = _onBookReady.asStateFlow()
+    private val _onBookReady = MutableStateFlow<Pair<String, String>?>(null)
+    val onBookReady: StateFlow<Pair<String, String>?> = _onBookReady.asStateFlow()
 
     /** Сервер доступен/недоступен — запускаем/приостанавливаем очередь. */
     fun setServerAvailable(available: Boolean) {
@@ -149,7 +149,7 @@ class DownloadQueue(
                             notReadyAttempts.remove(fast.chapterId)
                             snoozedUntil.remove(fast.chapterId)
                             _state.value = _state.value.copy(tasksPending = pendingSize())
-                            markBookIfReady(fast.bookId)
+                            markBookIfReady(fast.bookHash)
                         }
 
                         ChapterDownloadOutcome.NOT_READY,
@@ -163,7 +163,7 @@ class DownloadQueue(
                             // — на клиенте, в PlayerViewModel). Как только книга
                             // уйдёт в фон (demoteBook), глава попадёт в карусель
                             // фоновой очереди с её собственным бэкоффом.
-                            Log.d(TAG, "fast retry head book=${fast.bookId} " +
+                            Log.d(TAG, "fast retry head book=${fast.bookHash} " +
                                 "ord=${fast.ordinal} retryIn=${FAST_RETRY_DELAY_MS}ms")
                             delay(FAST_RETRY_DELAY_MS)
                         }
@@ -208,7 +208,7 @@ class DownloadQueue(
                         notReadyAttempts.remove(task.chapterId)
                         snoozedUntil.remove(task.chapterId)
                         _state.value = _state.value.copy(tasksPending = pendingSize())
-                        markBookIfReady(task.bookId)
+                        markBookIfReady(task.bookHash)
                     }
 
                     ChapterDownloadOutcome.NOT_READY -> {
@@ -224,7 +224,7 @@ class DownloadQueue(
                         )
                         snoozedUntil[task.chapterId] =
                             System.currentTimeMillis() + backoffMs
-                        Log.d(TAG, "bg not-ready book=${task.bookId} " +
+                        Log.d(TAG, "bg not-ready book=${task.bookHash} " +
                             "ord=${task.ordinal} attempts=$attempts " +
                             "retryIn=${backoffMs / 60000}min")
                         synchronized(queueLock) { pending.add(task) }
@@ -244,7 +244,7 @@ class DownloadQueue(
     }
 
     /** Глава нужна текущему воспроизведению? — книга открыта сейчас в плеере. */
-    private fun isPriority(bookId: Int): Boolean = playerBookId == bookId
+    private fun isPriority(bookHash: String): Boolean = playerBookHash == bookHash
 
     /** Добавить главу в очередь (идемпотентно по chapterId). */
     fun enqueue(task: DownloadTask) {
@@ -252,7 +252,7 @@ class DownloadQueue(
         // Свежая постановка = новая попытка: сбрасываем «спящий» режим.
         notReadyAttempts.remove(task.chapterId)
         snoozedUntil.remove(task.chapterId)
-        val queue = if (isPriority(task.bookId)) pendingHigh else pending
+        val queue = if (isPriority(task.bookHash)) pendingHigh else pending
         synchronized(queueLock) { queue.add(task) }
         _state.value = _state.value.copy(tasksPending = pendingSize())
         if (serverAvailable) ensureWorker()
@@ -274,22 +274,22 @@ class DownloadQueue(
         // add() в CLQ кладёт в хвост; пересоберём так, чтобы задача оказалась
         // первой — переставляем все главы этой книги в начало (стартовая
         // первой), как в promoteBook.
-        promoteBook(task.bookId, task.ordinal)
+        promoteBook(task.bookHash, task.ordinal)
         _state.value = _state.value.copy(tasksPending = pendingSize())
         if (serverAvailable) ensureWorker()
     }
 
     /**
-     * Вернулись в плеер с книгой [bookId] — её недокачанные главы переносятся в
+     * Вернулись в плеер с книгой [bookHash] — её недокачанные главы переносятся в
      * БЫСТРУЮ очередь. Стартовая глава [startOrdinal] ставится самой первой,
      * остальные — по возрастанию ordinal.
      */
-    fun promoteBook(bookId: Int, startOrdinal: Int? = null) {
-        playerBookId = bookId
+    fun promoteBook(bookHash: String, startOrdinal: Int? = null) {
+        playerBookHash = bookHash
         var moved = 0
         synchronized(queueLock) {
-            val mine = pendingHigh.filter { it.bookId == bookId } +
-                pending.filter { it.bookId == bookId }
+            val mine = pendingHigh.filter { it.bookHash == bookHash } +
+                pending.filter { it.bookHash == bookHash }
             if (mine.isEmpty()) return
             val ordered = mine
                 .distinctBy { it.chapterId }
@@ -302,27 +302,27 @@ class DownloadQueue(
                 snoozedUntil.remove(it.chapterId)
             }
             // Убираем главы книги из обеих очередей и кладём их в начало быстрой.
-            val restHigh = pendingHigh.filter { it.bookId != bookId }
-            val restLow = pending.filter { it.bookId != bookId }
+            val restHigh = pendingHigh.filter { it.bookHash != bookHash }
+            val restLow = pending.filter { it.bookHash != bookHash }
             pendingHigh = ConcurrentLinkedQueue(ordered + restHigh)
             pending = ConcurrentLinkedQueue(restLow)
             moved = ordered.size
         }
         _state.value = _state.value.copy(tasksPending = pendingSize())
-        if (moved > 0) Log.d(TAG, "promoteBook bookId=$bookId moved=$moved to fast")
+        if (moved > 0) Log.d(TAG, "promoteBook bookHash=$bookHash moved=$moved to fast")
     }
 
     /**
-     * Вышли из плеера с книгой [bookId] — её недокачанные главы уходят в
+     * Вышли из плеера с книгой [bookHash] — её недокачанные главы уходят в
      * ФОНОВУЮ очередь (в хвост) с экспоненциальной задержкой: воспроизведение
      * их больше не ждёт, они не должны перебивать другие книги.
      */
-    fun demoteBook(bookId: Int) {
-        if (playerBookId == bookId) playerBookId = null
+    fun demoteBook(bookHash: String) {
+        if (playerBookHash == bookHash) playerBookHash = null
         var moved = 0
         synchronized(queueLock) {
-            val mine = pendingHigh.filter { it.bookId == bookId } +
-                pending.filter { it.bookId == bookId }
+            val mine = pendingHigh.filter { it.bookHash == bookHash } +
+                pending.filter { it.bookHash == bookHash }
             if (mine.isEmpty()) return
             val ordered = mine.distinctBy { it.chapterId }.sortedBy { it.ordinal }
             ordered.forEach { t ->
@@ -335,14 +335,14 @@ class DownloadQueue(
                 )
                 snoozedUntil[t.chapterId] = System.currentTimeMillis() + backoffMs
             }
-            val restHigh = pendingHigh.filter { it.bookId != bookId }
-            val restLow = pending.filter { it.bookId != bookId }
+            val restHigh = pendingHigh.filter { it.bookHash != bookHash }
+            val restLow = pending.filter { it.bookHash != bookHash }
             pendingHigh = ConcurrentLinkedQueue(restHigh)
             pending = ConcurrentLinkedQueue(restLow + ordered)
             moved = ordered.size
         }
         _state.value = _state.value.copy(tasksPending = pendingSize())
-        Log.d(TAG, "demoteBook bookId=$bookId moved=$moved to background")
+        Log.d(TAG, "demoteBook bookHash=$bookHash moved=$moved to background")
     }
 
     /** Суммарный размер обеих очередей. */
@@ -350,11 +350,11 @@ class DownloadQueue(
         synchronized(queueLock) { pending.size + pendingHigh.size }
 
     /** Поставить книгу целиком (все главы) в очередь. */
-    fun enqueueBook(bookId: Int, chapters: List<ChapterDownloadSpec>) {
+    fun enqueueBook(bookHash: String, chapters: List<ChapterDownloadSpec>) {
         for (spec in chapters) {
             enqueue(
                 DownloadTask(
-                    bookId = bookId,
+                    bookHash = bookHash,
                     chapterId = spec.chapterId,
                     ordinal = spec.ordinal,
                     sizeBytes = spec.sizeBytes,
@@ -369,7 +369,7 @@ class DownloadQueue(
         // Обложку раздачи кладём в локальный кэш, пока сервер доступен —
         // она понадобится плееру оффлайн (как запасная, если у книги нет своей).
         coverStore.ensureReleaseCover(releaseId)
-        val books = repository.getBooksByRelease(releaseId, excludeBookId = -1)
+        val books = repository.getBooksByRelease(releaseId, excludeBookId = "")
         for (book in books) {
             val chapters = repository.getChapters(book.id)
             enqueueBook(
@@ -387,11 +387,11 @@ class DownloadQueue(
     }
 
     private suspend fun downloadChapter(task: DownloadTask): ChapterDownloadOutcome {
-        val part = storage.partFile(task.bookId, task.ordinal)
+        val part = storage.partFile(task.bookHash, task.ordinal)
         part.parentFile?.mkdirs()
         _state.value = _state.value.copy(
             isActive = true,
-            currentBookId = task.bookId,
+            currentBookHash = task.bookHash,
             currentChapterOrdinal = task.ordinal,
             totalBytes = task.sizeBytes,
         )
@@ -445,7 +445,7 @@ class DownloadQueue(
                 // На 409 глава ещё не готова на сервере — статус не портим.
                 repository.updateChapterLocal(task.chapterId, "partial", downloaded)
             }
-            Log.d(TAG, "downloadChapter failed book=${task.bookId} ord=${task.ordinal} " +
+            Log.d(TAG, "downloadChapter failed book=${task.bookHash} ord=${task.ordinal} " +
                 "bytes=$downloaded err=${e.message}")
             return if (notReady) {
                 ChapterDownloadOutcome.NOT_READY
@@ -459,7 +459,7 @@ class DownloadQueue(
 
     private suspend fun completeChapter(task: DownloadTask, part: File) {
         if (!serverAvailable) return
-        val ready = storage.chapterFile(task.bookId, task.ordinal)
+        val ready = storage.chapterFile(task.bookHash, task.ordinal)
         ready.parentFile?.mkdirs()
         if (ready.exists()) ready.delete()
         part.renameTo(ready)
@@ -469,26 +469,26 @@ class DownloadQueue(
         // После завершения докачки измеряем длительность готового .mp3 и сохраняем
         // в кэш — верхний бар книги начинает показывать реальную сумму.
         val durationSec = ChapterDurationProbe.measureDurationSec(ready)
-        Log.d(TAG, "completeChapter book=${task.bookId} ord=${task.ordinal} " +
+        Log.d(TAG, "completeChapter book=${task.bookHash} ord=${task.ordinal} " +
             "durationSec=$durationSec")
         repository.setChapterLocalDuration(task.chapterId, durationSec)
     }
 
-    private suspend fun markBookIfReady(bookId: Int) {
-        val chapters = repository.getChapters(bookId)
+    private suspend fun markBookIfReady(bookHash: String) {
+        val chapters = repository.getChapters(bookHash)
         val allReady = chapters.isNotEmpty() && chapters.all { storage.isChapterReady(it) }
-        val book = repository.getBookEntity(bookId)
+        val book = repository.getBookEntity(bookHash)
         // Обложку книги кэшируем локально, пока сервер доступен: оффлайн
         // плеер берёт её из файла и не обращается к серверу. Идемпотентно —
         // если файл уже есть, запрос не делается.
-        coverStore.ensureBookCover(bookId, force = book?.coverIsTemp == true)
+        coverStore.ensureBookCover(bookHash, force = book?.coverIsTemp == true)
         if (allReady && book != null) {
-            repository.updateBookLocal(bookId, "ready", book.sizeBytes ?: 0, book.sizeBytes ?: 0)
-            _onBookReady.value = bookId to (book.title)
+            repository.updateBookLocal(bookHash, "ready", book.sizeBytes ?: 0, book.sizeBytes ?: 0)
+            _onBookReady.value = bookHash to (book.title)
         } else if (book != null) {
             val readyCount = chapters.count { storage.isChapterReady(it) }
             val total = book.sizeBytes ?: 0
-            repository.updateBookLocal(bookId, "partial", total * readyCount / maxOf(1, chapters.size), total)
+            repository.updateBookLocal(bookHash, "partial", total * readyCount / maxOf(1, chapters.size), total)
         }
     }
 
@@ -502,7 +502,7 @@ class DownloadQueue(
         activeTasks.clear()
         notReadyAttempts.clear()
         snoozedUntil.clear()
-        playerBookId = null
+        playerBookHash = null
         _state.value = DownloadQueueState()
     }
 

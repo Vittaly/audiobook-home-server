@@ -5,7 +5,7 @@ import androidx.room.PrimaryKey
 
 @Entity(tableName = "playback_progress")
 data class ProgressEntity(
-    @PrimaryKey val bookId: Int,
+    @PrimaryKey val bookId: String,
     val chapterOrdinal: Int,
     val positionMs: Long,
     val updatedAt: Long,

@@ -52,7 +52,7 @@ data class ChapterOut(
 /** Краткое представление книги (тома) внутри карточки раздачи. */
 @JsonClass(generateAdapter = true)
 data class ReleaseBookOut(
-    val id: Int,
+    val id: String,
     val ordinal: Int,
     val title: String,
     val folder: String? = null,
@@ -70,7 +70,7 @@ data class ReleaseBookOut(
 /** Книга (том) внутри карточки раздачи с главами (ReleaseBookOut + chapters). */
 @JsonClass(generateAdapter = true)
 data class ReleaseBookDetailOut(
-    val id: Int,
+    val id: String,
     val ordinal: Int,
     val title: String,
     val folder: String? = null,
@@ -154,7 +154,7 @@ data class ReleaseListResponse(
 
 @JsonClass(generateAdapter = true)
 data class BookOut(
-    val id: Int,
+    val id: String,
     val ordinal: Int = 1,
     val title: String,
     val author: String? = null,
@@ -176,7 +176,7 @@ data class BookOut(
 
 @JsonClass(generateAdapter = true)
 data class BookDetailOut(
-    val id: Int,
+    val id: String,
     val ordinal: Int = 1,
     val title: String,
     val author: String? = null,
@@ -219,15 +219,10 @@ data class HealthOut(
 
 @JsonClass(generateAdapter = true)
 data class DownloadStartedOut(
-    // Идентификатор раздачи — основной объект загрузки; книги (одна или
-    // несколько) — производные от раздачи и на старте их может ещё не быть.
-    val release_id: Int? = null,
-    // При старте всей раздачи (POST /releases/{id}/download) книг может ещё не быть,
-    // сервер возвращает book_id: null, поэтому поле nullable.
-    val book_id: Int? = null,
-    // Сервер возвращает client_id как строку (хэш торрента у qBittorrent/Transmission),
-    // несмотря на openapi.yaml с типом integer.
+    // Идентификатор загрузки (хэш торрента у qBittorrent/Transmission).
     val client_id: String? = null,
+    // Хэш книги при старте загрузки конкретной книги.
+    val book_hash: String? = null,
     val status: BookStatus,
     val save_path: String,
     val message: String,
@@ -235,7 +230,7 @@ data class DownloadStartedOut(
 
 @JsonClass(generateAdapter = true)
 data class DownloadStoppedOut(
-    val book_id: Int,
+    val book_hash: String,
     val status: BookStatus,
     val message: String,
 )
@@ -253,8 +248,7 @@ data class ChapterProgressOut(
 
 @JsonClass(generateAdapter = true)
 data class DownloadStatusOut(
-    val book_id: Int,
-    val release_id: Int? = null,
+    val book_hash: String,
     val status: BookStatus,
     val client_state: String? = null,
     val progress: Float,
@@ -271,7 +265,7 @@ data class DownloadStatusOut(
 
 @JsonClass(generateAdapter = true)
 data class BookDeletedOut(
-    val book_id: Int,
+    val book_hash: String,
     val status: BookStatus,
     val freed_bytes: Long,
     val message: String,
@@ -282,7 +276,7 @@ data class PriorityRequest(val priority: Int)
 
 @JsonClass(generateAdapter = true)
 data class PriorityOut(
-    val book_id: Int,
+    val book_hash: String,
     val priority: Int,
     val message: String,
 )

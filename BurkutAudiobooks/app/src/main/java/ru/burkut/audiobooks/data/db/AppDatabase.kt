@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         BookEntity::class,
         ChapterEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -116,6 +116,97 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Версия 6: bookId Int → String (SHA256 hash), book_hash rename.
+         *
+         * SQLite не поддерживает ALTER COLUMN для изменения типа, поэтому
+         * пересоздаём таблицы books, chapters, playback_progress с новыми типами.
+         */
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                // 1. backup existing data
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS books_old AS SELECT * FROM books"
+                )
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS chapters_old AS SELECT * FROM chapters"
+                )
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS playback_progress_old AS SELECT * FROM playback_progress"
+                )
+
+                // 2. drop old tables
+                database.execSQL("DROP TABLE IF EXISTS books")
+                database.execSQL("DROP TABLE IF EXISTS chapters")
+                database.execSQL("DROP TABLE IF EXISTS playback_progress")
+
+                // 3. recreate books with TEXT primary key
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS books (" +
+                        "id TEXT NOT NULL PRIMARY KEY, " +
+                        "releaseId INTEGER, ordinal INTEGER NOT NULL, title TEXT NOT NULL, " +
+                        "folder TEXT, author TEXT, narrator TEXT, year INTEGER, language TEXT, " +
+                        "description TEXT, rubrics TEXT, status TEXT NOT NULL, " +
+                        "chaptersCount INTEGER NOT NULL DEFAULT 0, chaptersReady INTEGER NOT NULL DEFAULT 0, " +
+                        "totalDurationSec INTEGER, sizeBytes INTEGER, coverUrl TEXT, " +
+                        "coverIsTemp INTEGER NOT NULL DEFAULT 0, addedAt TEXT NOT NULL, lastAccessed TEXT, " +
+                        "seriesId INTEGER, seriesTitle TEXT, seriesOrder INTEGER, " +
+                        "isProvisional INTEGER NOT NULL DEFAULT 0, " +
+                        "localStatus TEXT NOT NULL DEFAULT 'absent', " +
+                        "downloadedBytes INTEGER NOT NULL DEFAULT 0, localTotalBytes INTEGER NOT NULL DEFAULT 0)"
+                )
+
+                // 4. recreate chapters with TEXT bookId
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS chapters (" +
+                        "id INTEGER NOT NULL PRIMARY KEY, " +
+                        "bookId TEXT NOT NULL, ordinal INTEGER NOT NULL, title TEXT, " +
+                        "durationSec INTEGER, sizeBytes INTEGER NOT NULL, status TEXT NOT NULL, " +
+                        "progress REAL NOT NULL DEFAULT 0, " +
+                        "localStatus TEXT NOT NULL DEFAULT 'absent', downloadedBytes INTEGER NOT NULL DEFAULT 0, " +
+                        "localDurationSec INTEGER)"
+                )
+
+                // 5. recreate playback_progress with TEXT bookId
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS playback_progress (" +
+                        "bookId TEXT NOT NULL PRIMARY KEY, " +
+                        "chapterOrdinal INTEGER NOT NULL, " +
+                        "positionMs INTEGER NOT NULL, " +
+                        "updatedAt INTEGER NOT NULL)"
+                )
+
+                // 6. migrate data — cast Int id to TEXT (string representation of int)
+                database.execSQL(
+                    "INSERT INTO books (id, releaseId, ordinal, title, folder, author, narrator, " +
+                        "year, language, description, status, chaptersCount, chaptersReady, " +
+                        "totalDurationSec, sizeBytes, coverUrl, coverIsTemp, addedAt, lastAccessed, " +
+                        "seriesId, seriesTitle, seriesOrder, localStatus, downloadedBytes, localTotalBytes) " +
+                        "SELECT CAST(id AS TEXT), releaseId, ordinal, title, folder, author, narrator, " +
+                        "year, language, description, status, chaptersCount, chaptersReady, " +
+                        "totalDurationSec, sizeBytes, coverUrl, coverIsTemp, addedAt, lastAccessed, " +
+                        "seriesId, seriesTitle, seriesOrder, localStatus, downloadedBytes, localTotalBytes " +
+                        "FROM books_old"
+                )
+                database.execSQL(
+                    "INSERT INTO chapters (id, bookId, ordinal, title, durationSec, sizeBytes, status, " +
+                        "progress, localStatus, downloadedBytes, localDurationSec) " +
+                        "SELECT id, CAST(bookId AS TEXT), ordinal, title, durationSec, sizeBytes, status, " +
+                        "progress, localStatus, downloadedBytes, localDurationSec FROM chapters_old"
+                )
+                database.execSQL(
+                    "INSERT INTO playback_progress (bookId, chapterOrdinal, positionMs, updatedAt) " +
+                        "SELECT CAST(bookId AS TEXT), chapterOrdinal, positionMs, updatedAt " +
+                        "FROM playback_progress_old"
+                )
+
+                // 7. drop backup tables
+                database.execSQL("DROP TABLE IF EXISTS books_old")
+                database.execSQL("DROP TABLE IF EXISTS chapters_old")
+                database.execSQL("DROP TABLE IF EXISTS playback_progress_old")
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -124,7 +215,7 @@ abstract class AppDatabase : RoomDatabase() {
                     "audiobooks.db",
                 )
                     .addMigrations(
-                        MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
+                        MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6,
                     )
                     .build()
                     .also { instance = it }

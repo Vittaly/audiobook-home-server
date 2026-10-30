@@ -74,7 +74,7 @@ class App : Application() {
         downloadQueue = DownloadQueue(repository, storage, coverStore)
         notificationHelper = BookNotificationHelper(this)
         localDataSourceFactory = LocalBookDataSourceFactory(
-            resolveFile = { bookId, ordinal -> storage.playbackFile(bookId, ordinal) },
+            resolveFile = { bookHash, ordinal -> storage.playbackFile(bookHash, ordinal) },
             // Источник знает доступность сервера и оффлайн не ждёт файлов,
             // которых нет и не появятся.
             isOnline = {
@@ -87,17 +87,15 @@ class App : Application() {
 
         storage.migrateAndClean(this)
 
-        // При появлении доступа к серверу качаем раздачи, поставленные в очередь оффлайн.
+        // При появлении доступа к серверу синхронизируем каталог и догружаем обложки.
         serverMonitor.onServerOnline = { baseUrl ->
             appScope.launch {
                 downloadQueue.setServerAvailable(true)
                 // Догружаем обложки уже скачанных книг: книги, загруженные до
                 // появления кэша обложек, тоже должны показываться оффлайн.
                 coverStore.warmUpReadyBooks()
-                val queued = repository.getQueuedReleases()
-                for (release in queued) {
-                    downloadQueue.enqueueRelease(release.id, baseUrl)
-                }
+                // Синхронизируем каталог при возвращении сервера.
+                runCatching { repository.syncBooks() }
             }
         }
 

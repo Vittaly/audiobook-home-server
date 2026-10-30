@@ -40,12 +40,12 @@ interface CatalogDao {
     @Query("SELECT * FROM books WHERE releaseId = :releaseId ORDER BY ordinal")
     fun observeBooks(releaseId: Int): kotlinx.coroutines.flow.Flow<List<BookEntity>>
 
-    /** Все книги кэша — нужны каталогу для фильтрации раздач по серии. */
+    /** Все книги кэша (для каталога и фильтрации по сериям). */
     @Query("SELECT * FROM books")
     fun observeAllBooks(): kotlinx.coroutines.flow.Flow<List<BookEntity>>
 
     @Query("SELECT * FROM books WHERE id = :id")
-    suspend fun getBook(id: Int): BookEntity?
+    suspend fun getBook(id: String): BookEntity?
 
     /** Все книги кэша (для разовой догрузки недостающих обложек). */
     @Query("SELECT * FROM books")
@@ -61,21 +61,21 @@ interface CatalogDao {
     suspend fun upsertBook(entity: BookEntity): Long
 
     @Query("UPDATE books SET localStatus = :status, downloadedBytes = :downloaded, localTotalBytes = :total WHERE id = :id")
-    suspend fun updateBookLocal(id: Int, status: String, downloaded: Long, total: Long)
+    suspend fun updateBookLocal(id: String, status: String, downloaded: Long, total: Long)
 
     // ---------- Chapters ----------
 
     @Query("SELECT * FROM chapters WHERE bookId = :bookId ORDER BY ordinal")
-    fun observeChapters(bookId: Int): kotlinx.coroutines.flow.Flow<List<ChapterEntity>>
+    fun observeChapters(bookId: String): kotlinx.coroutines.flow.Flow<List<ChapterEntity>>
 
     @Query("SELECT * FROM chapters WHERE bookId = :bookId ORDER BY ordinal")
-    suspend fun getChapters(bookId: Int): List<ChapterEntity>
+    suspend fun getChapters(bookId: String): List<ChapterEntity>
 
     @Query("SELECT * FROM chapters WHERE id = :id")
     suspend fun getChapter(id: Int): ChapterEntity?
 
     @Query("SELECT * FROM chapters WHERE bookId = :bookId AND ordinal = :ordinal")
-    suspend fun getChapterByOrdinal(bookId: Int, ordinal: Int): ChapterEntity?
+    suspend fun getChapterByOrdinal(bookId: String, ordinal: Int): ChapterEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertChapter(entity: ChapterEntity): Long
@@ -87,7 +87,7 @@ interface CatalogDao {
     @Query("UPDATE chapters SET localDurationSec = :durationSec WHERE id = :id")
     suspend fun setChapterLocalDuration(id: Int, durationSec: Int?)
 
-    // ---------- Snapshot (полная замена каталога раздач) ----------
+    // ---------- Snapshot (полная замена каталога) ----------
 
     @Query("DELETE FROM releases")
     suspend fun clearReleases()

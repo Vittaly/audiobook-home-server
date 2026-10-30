@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -22,7 +23,6 @@ import ru.burkut.audiobooks.ui.catalog.CatalogScreen
 import ru.burkut.audiobooks.ui.components.MiniPlayer
 import ru.burkut.audiobooks.ui.detail.BookDetailScreen
 import ru.burkut.audiobooks.ui.player.PlayerScreen
-import ru.burkut.audiobooks.ui.release.ReleaseDetailScreen
 import ru.burkut.audiobooks.ui.settings.ServerDialog
 import ru.burkut.audiobooks.ui.theme.AppTheme
 import ru.burkut.audiobooks.ui.viewModelFactoryOf
@@ -52,6 +52,17 @@ fun AppContent() {
 
     var showServerSettings by rememberSaveable { mutableStateOf(false) }
 
+    // ---------- Гейт готовности: когда плеер готов — навигируем на него. ----------
+    val playRequest by playerVm.playRequest.collectAsState()
+
+    LaunchedEffect(playRequest) {
+        // Как только плеер сообщит, что можно играть (waiting=false,
+        // requestedBookHash не null) — открываем плеер.
+        if (!playRequest.waiting && playRequest.requestedBookHash != null) {
+            navController.navigate("player")
+        }
+    }
+
     Scaffold(
         bottomBar = {
             MiniPlayer(
@@ -67,43 +78,29 @@ fun AppContent() {
         ) {
             composable("catalog") {
                 CatalogScreen(
-                    onOpenRelease = { id -> navController.navigate("release/$id") },
+                    onOpenBook = { id -> navController.navigate("book/$id") },
+                    onPlayBook = { id ->
+                        // Запускаем подготовку книги (загрузка + ожидание глав).
+                        // Навигацию на плеер выполнит гейт готовности выше.
+                        playerVm.playBook(id)
+                    },
                     onOpenSettings = { showServerSettings = true },
+                    playerVm = playerVm,
                 )
             }
 
-            composable("release/{releaseId}") { entry ->
-                val releaseId = entry.arguments?.getString("releaseId")?.toIntOrNull()
-                if (releaseId != null) {
-                    ReleaseDetailScreen(
-                        releaseId = releaseId,
-                        onBack = { navController.popBackStack() },
-                        onOpenBook = { id -> navController.navigate("book/$id") },
-                        onPlayRelease = {
-                            // Играем ВСЮ раздачу с самого начала, не зная заранее
-                            // сколько в ней книг. Загрузку стартуем на уровне раздачи:
-                            // сервер не создаёт книгу-заглушку, книги появляются
-                            // только по факту сканирования структуры торрента.
-                            android.util.Log.d("MainActivity", "onPlayRelease releaseId=$releaseId")
-                            playerVm.playRelease(releaseId)
-                            navController.navigate("player")
-                        },
-                    )
-                }
-            }
-
-            composable("book/{bookId}") { entry ->
-                val bookId = entry.arguments?.getString("bookId")?.toIntOrNull()
-                if (bookId != null) {
+            composable("book/{bookHash}") { entry ->
+                val bookHash = entry.arguments?.getString("bookHash")
+                if (bookHash != null) {
                     BookDetailScreen(
-                        bookId = bookId,
+                        bookHash = bookHash,
                         onBack = { navController.popBackStack() },
                         onPlay = { id ->
-                            // Стартуем воспроизведение (локальный файл + докачка через очередь)
-                            // и сразу открываем полноэкранный плеер.
+                            // Запускаем подготовку книги; навигацию на плеер
+                            // выполнит гейт готовности.
                             playerVm.playBook(id)
-                            navController.navigate("player")
                         },
+                        playerVm = playerVm,
                     )
                 }
             }

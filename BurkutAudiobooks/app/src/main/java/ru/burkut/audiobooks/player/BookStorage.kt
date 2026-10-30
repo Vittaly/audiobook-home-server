@@ -8,22 +8,22 @@ import java.io.File
 /**
  * Управление локальными файлами книг.
  *
- * Структура: filesDir/books/{bookId}/{ordinal}.mp3 (+ {ordinal}.mp3.part во время загрузки)
+ * Структура: filesDir/books/{bookHash}/{ordinal}.mp3 (+ {ordinal}.mp3.part во время загрузки)
  */
 class BookStorage(context: Context) {
 
     private val root = File(context.filesDir, "books")
 
-    fun bookDir(bookId: Int): File = File(root, bookId.toString())
+    fun bookDir(bookHash: String): File = File(root, bookHash)
 
-    fun chapterFile(bookId: Int, ordinal: Int): File =
-        File(bookDir(bookId), "$ordinal.mp3")
+    fun chapterFile(bookHash: String, ordinal: Int): File =
+        File(bookDir(bookHash), "$ordinal.mp3")
 
-    fun partFile(bookId: Int, ordinal: Int): File =
-        File(bookDir(bookId), "$ordinal.mp3.part")
+    fun partFile(bookHash: String, ordinal: Int): File =
+        File(bookDir(bookHash), "$ordinal.mp3.part")
 
     /** Локальный файл обложки книги (кэшируется, пока сервер доступен). */
-    fun coverFile(bookId: Int): File = File(bookDir(bookId), "cover.jpg")
+    fun coverFile(bookHash: String): File = File(bookDir(bookHash), "cover.jpg")
 
     /** Локальный файл обложки раздачи (запасной вариант, если у книги нет своей). */
     fun releaseCoverFile(releaseId: Int): File =
@@ -48,9 +48,9 @@ class BookStorage(context: Context) {
         if (online) chapters else chapters.filter { isChapterReady(it) }
 
     /** Файл, который нужно отдавать плееру для главы: если растущий — .part, иначе готовый .mp3. */
-    fun playbackFile(bookId: Int, ordinal: Int): File {
-        val ready = chapterFile(bookId, ordinal)
-        return if (ready.exists() && ready.length() > 0) ready else partFile(bookId, ordinal)
+    fun playbackFile(bookHash: String, ordinal: Int): File {
+        val ready = chapterFile(bookHash, ordinal)
+        return if (ready.exists() && ready.length() > 0) ready else partFile(bookHash, ordinal)
     }
 
     /** Очистка старого SimpleCache (вызывается при инициализации после обновления). */

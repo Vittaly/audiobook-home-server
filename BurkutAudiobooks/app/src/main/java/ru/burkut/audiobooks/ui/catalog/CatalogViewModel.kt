@@ -14,11 +14,10 @@ import kotlinx.coroutines.launch
 import ru.burkut.audiobooks.App
 import ru.burkut.audiobooks.data.ServerAvailability
 import ru.burkut.audiobooks.data.db.BookEntity
-import ru.burkut.audiobooks.data.db.ReleaseEntity
 
-/** Режим сортировки каталога раздач. */
+/** Режим сортировки каталога книг. */
 enum class CatalogSort {
-    /** По дате релиза: сначала самые свежие. */
+    /** По дате добавления: сначала самые свежие. */
     DATE_DESC,
 
     /** По названию, по возрастанию. */
@@ -44,7 +43,7 @@ data class CatalogFilters(
 
 /** Готовое к отрисовке состояние экрана каталога. */
 data class CatalogUiState(
-    val releases: List<ReleaseEntity> = emptyList(),
+    val books: List<BookEntity> = emptyList(),
     val totalCount: Int = 0,
     val availableRubrics: List<String> = emptyList(),
     val availableSeries: List<SeriesOption> = emptyList(),
@@ -53,7 +52,7 @@ data class CatalogUiState(
 )
 
 /**
- * Каталог раздач: cache-first.
+ * Каталог книг: cache-first.
  *
  * Данные читаются только из Room (работает оффлайн). Поиск по названию/автору,
  * фильтрация по рубрикам и сериям, а также сортировка выполняются на клиенте,
@@ -76,11 +75,7 @@ class CatalogViewModel(application: Application) : ViewModel() {
     private val _cachedAtMinute = MutableStateFlow(0L)
     val cachedAtMinute: StateFlow<Long> = _cachedAtMinute.asStateFlow()
 
-    // Все раздачи и книги из кэша (до фильтрации).
-    private val allReleases: StateFlow<List<ReleaseEntity>> =
-        repository.observeReleases()
-            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
-
+    // Все книги из кэша (до фильтрации).
     private val allBooks: StateFlow<List<BookEntity>> =
         repository.observeAllBooks()
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
@@ -88,16 +83,15 @@ class CatalogViewModel(application: Application) : ViewModel() {
     /** Единое состояние экрана: применяет поиск, фильтры и сортировку к кэшу. */
     val state: StateFlow<CatalogUiState> =
         combine(
-            allReleases,
             allBooks,
             _filters,
             _isLoading,
             _isServerOnline,
-        ) { releases, books, filters, _loadingUnused, online ->
+        ) { books, filters, _loadingUnused, online ->
             CatalogUiState(
-                releases = applyFilters(releases, books, filters),
-                totalCount = releases.size,
-                availableRubrics = rubricOptions(releases),
+                books = applyFilters(books, filters),
+                totalCount = books.size,
+                availableRubrics = rubricOptions(books),
                 availableSeries = seriesOptions(books),
                 filters = filters,
                 isServerOnline = online,
@@ -121,7 +115,7 @@ class CatalogViewModel(application: Application) : ViewModel() {
         viewModelScope.launch {
             _isLoading.value = true
             try {
-                runCatching { repository.syncReleases() }
+                runCatching { repository.syncBooks() }
                 _cachedAtMinute.value = System.currentTimeMillis() / 60_000
             } finally {
                 _isLoading.value = false
@@ -157,49 +151,41 @@ class CatalogViewModel(application: Application) : ViewModel() {
     // ---------- Чистые функции фильтрации/сортировки ----------
 
     private fun applyFilters(
-        releases: List<ReleaseEntity>,
         books: List<BookEntity>,
         filters: CatalogFilters,
-    ): List<ReleaseEntity> {
-        // Сопоставление раздача -> множество id серий её книг (из кэша).
-        val seriesByRelease: Map<Int, Set<Int>> = books
-            .mapNotNull { book -> book.seriesId?.let { book.releaseId to it } }
-            .groupBy({ it.first }, { it.second })
-            .mapValues { (_, ids) -> ids.toSet() }
-
+    ): List<BookEntity> {
         val q = filters.query.trim().lowercase()
 
-        return releases
+        return books
             .asSequence()
-            .filter { rel ->
+            .filter { book ->
                 q.isEmpty() ||
-                    rel.title.lowercase().contains(q) ||
-                    rel.author?.lowercase()?.contains(q) == true
+                    book.title.lowercase().contains(q) ||
+                    book.author?.lowercase()?.contains(q) == true
             }
-            .filter { rel ->
+            .filter { book ->
                 val rubric = filters.rubric
-                rubric == null || rel.rubricList().any { it.equals(rubric, ignoreCase = true) }
+                rubric == null || book.rubricList().any { it.equals(rubric, ignoreCase = true) }
             }
-            .filter { rel ->
+            .filter { book ->
                 val seriesId = filters.seriesId
-                seriesId == null || seriesByRelease[rel.id]?.contains(seriesId) == true
+                seriesId == null || book.seriesId == seriesId
             }
             .sortedWith(comparatorFor(filters.sort))
             .toList()
     }
 
-    private fun comparatorFor(sort: CatalogSort): Comparator<ReleaseEntity> = when (sort) {
-        // releasedAt — дата создания раздачи на трекере (ISO-8601): лексикографический
-        // порядок совпадает с хронологическим, поэтому обратная сортировка даёт
-        // свежие сверху. Если даты трекера нет — откатываемся к addedAt.
-        CatalogSort.DATE_DESC -> compareByDescending { it.releasedAt ?: it.addedAt }
+    private fun comparatorFor(sort: CatalogSort): Comparator<BookEntity> = when (sort) {
+        // addedAt — дата добавления книги (ISO-8601): обратная сортировка даёт
+        // свежие сверху.
+        CatalogSort.DATE_DESC -> compareByDescending { it.addedAt }
         CatalogSort.TITLE_ASC -> compareBy { it.title.lowercase() }
         CatalogSort.YEAR_DESC -> compareByDescending { it.year ?: 0 }
     }
 
-    /** Список доступных рубрик каталога (из кэша раздач). */
-    private fun rubricOptions(releases: List<ReleaseEntity>): List<String> =
-        releases
+    /** Список доступных рубрик каталога (из кэша книг). */
+    private fun rubricOptions(books: List<BookEntity>): List<String> =
+        books
             .flatMap { it.rubricList() }
             .filter { it.isNotBlank() }
             .distinctBy { it.lowercase() }
@@ -217,6 +203,6 @@ class CatalogViewModel(application: Application) : ViewModel() {
             .sortedBy { it.title.lowercase() }
 }
 
-/** Рубрики раздачи хранятся в кэше одной строкой, разделённой переводами строк. */
-private fun ReleaseEntity.rubricList(): List<String> =
+/** Рубрики книги хранятся в кэше одной строкой, разделённой переводами строк. */
+private fun BookEntity.rubricList(): List<String> =
     rubrics?.split("\n")?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()

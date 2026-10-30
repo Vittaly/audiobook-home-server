@@ -49,46 +49,45 @@ interface ApiService {
         @Query("order") order: String? = null,
     ): BookListResponse
 
-    @GET("books/{book_id}")
-    suspend fun getBook(@Path("book_id") bookId: Int): BookDetailOut
+    @GET("books/{book_hash}")
+    suspend fun getBook(@Path("book_hash") bookHash: String): BookDetailOut
 
-    @GET("books/{book_id}/cover")
-    suspend fun getCover(@Path("book_id") bookId: Int): ResponseBody
+    @GET("books/{book_hash}/cover")
+    suspend fun getCover(@Path("book_hash") bookHash: String): ResponseBody
 
     /**
-     * Лёгкая проверка обложки: HEAD /books/{id}/cover отдаёт заголовки без
+     * Лёгкая проверка обложки: HEAD /books/{hash}/cover отдаёт заголовки без
      * тела. Заголовок X-Cover-Temp == "true" означает, что обложка ещё
      * временная (можно её получить позже), его отсутствие — финал.
      */
-    @HEAD("books/{book_id}/cover")
+    @HEAD("books/{book_hash}/cover")
     suspend fun headCover(
-        @Path("book_id") bookId: Int,
+        @Path("book_hash") bookHash: String,
     ): Response<ResponseBody>
 
-    @POST("books/{book_id}/download")
-    suspend fun startDownload(@Path("book_id") bookId: Int): DownloadStartedOut
+    @POST("books/{book_hash}/download")
+    suspend fun startDownload(@Path("book_hash") bookHash: String): DownloadStartedOut
 
     @POST("releases/{release_id}/download")
     suspend fun startReleaseDownload(
         @Path("release_id") releaseId: Int,
-        @Query("book_id") bookId: Int? = null,
     ): DownloadStartedOut
 
-    @DELETE("books/{book_id}/download")
+    @DELETE("books/{book_hash}/download")
     suspend fun stopDownload(
-        @Path("book_id") bookId: Int,
+        @Path("book_hash") bookHash: String,
         @Query("delete_files") deleteFiles: Boolean = false,
     ): DownloadStoppedOut
 
-    @GET("books/{book_id}/status")
-    suspend fun getDownloadStatus(@Path("book_id") bookId: Int): DownloadStatusOut
+    @GET("books/{book_hash}/status")
+    suspend fun getDownloadStatus(@Path("book_hash") bookHash: String): DownloadStatusOut
 
-    @POST("books/{book_id}/priority")
+    @POST("books/{book_hash}/priority")
     suspend fun setPriority(
-        @Path("book_id") bookId: Int,
+        @Path("book_hash") bookHash: String,
         @Body request: PriorityRequest,
     ): PriorityOut
 
-    @DELETE("books/{book_id}")
-    suspend fun deleteBook(@Path("book_id") bookId: Int): BookDeletedOut
+    @DELETE("books/{book_hash}")
+    suspend fun deleteBook(@Path("book_hash") bookHash: String): BookDeletedOut
 }
