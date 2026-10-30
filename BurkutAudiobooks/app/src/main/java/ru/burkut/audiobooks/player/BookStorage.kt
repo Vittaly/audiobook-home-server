@@ -39,6 +39,18 @@ class BookStorage(context: Context) {
     }
 
     /**
+     * Готова ли первая глава книги на устройстве.
+     *
+     * Сервер создаёт главы с ordinal, начиная с 1, поэтому «первая глава» —
+     * это всегда файл "{FIRST_CHAPTER_ORDINAL}.mp3". Признак готовности —
+     * существование непустого файла на диске (скачана при прослушивании).
+     */
+    fun isFirstChapterReady(bookHash: String): Boolean {
+        val f = chapterFile(bookHash, FIRST_CHAPTER_ORDINAL)
+        return f.exists() && f.length() > 0
+    }
+
+    /**
      * Состав воспроизводимого плейлиста — это задача источника, а не плеера.
      * Онлайн: все главы (недостающие докачает очередь, плеер стартует на растущем .part).
      * Оффлайн: только те, чей готовый `.mp3` реально лежит на диске — плеер не должен
@@ -60,5 +72,10 @@ class BookStorage(context: Context) {
             runCatching { legacy.deleteRecursively() }
         }
         if (!root.exists()) root.mkdirs()
+    }
+
+    companion object {
+        /** Сервер нумерует главы с 1: первая глава книги — всегда файл "1.mp3". */
+        const val FIRST_CHAPTER_ORDINAL = 1
     }
 }

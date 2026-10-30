@@ -888,7 +888,8 @@ class PlayerViewModel(application: Application) : ViewModel() {
             val parsed = parseMediaId(mediaId) ?: return@launch
             val (bookHash, _) = parsed
             val book = repository.getBookEntity(bookHash) ?: return@launch
-            val siblings = repository.getBooksByRelease(book.releaseId, bookHash)
+            val releaseId = book.releaseId ?: return@launch
+            val siblings = repository.getBooksByRelease(releaseId, bookHash)
             // Следующим будет том со следующим порядковым номером.
             val next = siblings.firstOrNull { it.ordinal > book.ordinal }
                 ?: siblings.firstOrNull()

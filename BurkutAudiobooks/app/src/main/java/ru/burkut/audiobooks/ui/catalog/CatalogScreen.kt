@@ -135,6 +135,7 @@ fun CatalogScreen(
                     BookCard(
                         book = book,
                         playRequest = playRequest,
+                        firstChapterReady = book.id in state.firstChapterReadyIds,
                         onClick = { onOpenBook(book.id) },
                         onPlay = { onPlayBook(book.id) },
                     )
@@ -281,16 +282,25 @@ private fun CatalogFiltersBar(
 private fun BookCard(
     book: BookEntity,
     playRequest: PlayRequestUiState,
+    firstChapterReady: Boolean,
     onClick: () -> Unit,
     onPlay: () -> Unit,
 ) {
     val waitingForThis = playRequest.requestedBookHash == book.id && playRequest.waiting
 
-    Card(
-        modifier = Modifier
+    val cardModifier = if (waitingForThis) {
+        Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 6.dp)
-            .when(!waitingForThis) { clickable(onClick = onClick) },
+    } else {
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .clickable(onClick = onClick)
+    }
+
+    Card(
+        modifier = cardModifier,
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
     ) {
         when {
@@ -328,48 +338,62 @@ private fun BookCard(
 
             // Нормальная карточка книги.
             else -> {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(12.dp),
-                ) {
-                    AsyncImage(
-                        model = book.coverUrl,
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.size(72.dp),
-                    )
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(start = 12.dp),
+                Box {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp),
                     ) {
-                        Text(
-                            book.title,
-                            style = MaterialTheme.typography.titleMedium,
-                            maxLines = 2,
+                        AsyncImage(
+                            model = book.coverUrl,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.size(72.dp),
                         )
-                        val meta = buildList {
-                            if (book.ordinal > 0) add("Том ${book.ordinal}")
-                            book.author?.let { add(it) }
-                            book.narrator?.let { add("Читает: $it") }
-                            book.totalDurationSec?.let { add(formatSeconds(it)) }
-                        }.joinToString(" · ")
-                        if (meta.isNotEmpty()) {
-                            Spacer(Modifier.height(4.dp))
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(start = 12.dp),
+                        ) {
                             Text(
-                                meta,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                book.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 2,
                             )
-                        }
-                        Spacer(Modifier.height(8.dp))
-                        Row(horizontalArrangement = Arrangement.End) {
-                            Button(onClick = onPlay) {
-                                Icon(Icons.Default.PlayArrow, contentDescription = null)
-                                Spacer(Modifier.size(4.dp))
-                                Text("Слушать")
+                            val meta = buildList {
+                                if (book.ordinal > 0) add("Том ${book.ordinal}")
+                                book.author?.let { add(it) }
+                                book.narrator?.let { add("Читает: $it") }
+                                book.totalDurationSec?.let { add(formatSeconds(it)) }
+                            }.joinToString(" · ")
+                            if (meta.isNotEmpty()) {
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    meta,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Row(horizontalArrangement = Arrangement.End) {
+                                Button(onClick = onPlay) {
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null)
+                                    Spacer(Modifier.size(4.dp))
+                                    Text("Слушать")
+                                }
                             }
                         }
+                    }
+
+                    // Зелёная точка — первая глава скачана на устройство.
+                    if (firstChapterReady) {
+                        Surface(
+                            shape = CircleShape,
+                            color = serverOnlineColor(),
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(6.dp)
+                                .size(10.dp),
+                        ) {}
                     }
                 }
             }

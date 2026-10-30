@@ -1,4 +1,4 @@
-package ru.burkut.audiobooks.ui.catalog
+ в package ru.burkut.audiobooks.ui.catalog
 
 import android.app.Application
 import androidx.lifecycle.ViewModel
@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import ru.burkut.audiobooks.App
 import ru.burkut.audiobooks.data.ServerAvailability
 import ru.burkut.audiobooks.data.db.BookEntity
@@ -49,6 +50,8 @@ data class CatalogUiState(
     val availableSeries: List<SeriesOption> = emptyList(),
     val filters: CatalogFilters = CatalogFilters(),
     val isServerOnline: Boolean = false,
+    /** id книг, у которых первая глава уже скачана на устройство (зелёная точка). */
+    val firstChapterReadyIds: Set<String> = emptySet(),
 )
 
 /**
@@ -62,6 +65,7 @@ class CatalogViewModel(application: Application) : ViewModel() {
 
     private val app = application as App
     private val repository = app.repository
+    private val storage = app.storage
 
     private val _filters = MutableStateFlow(CatalogFilters())
     val filters: StateFlow<CatalogFilters> = _filters.asStateFlow()
@@ -75,6 +79,11 @@ class CatalogViewModel(application: Application) : ViewModel() {
     private val _cachedAtMinute = MutableStateFlow(0L)
     val cachedAtMinute: StateFlow<Long> = _cachedAtMinute.asStateFlow()
 
+    // id книг, у которых первая глава реально скачана на устройство (файл на диске).
+    // Главы не пишутся в Room (в каталог синкаются только книги), поэтому
+    // единственный надёжный источник готовности — проверка файла {ordinal}.mp3.
+    private val _firstChapterReadyIds = MutableStateFlow<Set<String>>(emptySet())
+
     // Все книги из кэша (до фильтрации).
     private val allBooks: StateFlow<List<BookEntity>> =
         repository.observeAllBooks()
@@ -87,7 +96,8 @@ class CatalogViewModel(application: Application) : ViewModel() {
             _filters,
             _isLoading,
             _isServerOnline,
-        ) { books, filters, _loadingUnused, online ->
+            _firstChapterReadyIds,
+        ) { books, filters, _loadingUnused, online, firstChapterReadyIds ->
             CatalogUiState(
                 books = applyFilters(books, filters),
                 totalCount = books.size,
@@ -95,6 +105,7 @@ class CatalogViewModel(application: Application) : ViewModel() {
                 availableSeries = seriesOptions(books),
                 filters = filters,
                 isServerOnline = online,
+                firstChapterReadyIds = firstChapterReadyIds,
             )
         }.stateIn(
             viewModelScope,
@@ -108,7 +119,29 @@ class CatalogViewModel(application: Application) : ViewModel() {
                 _isServerOnline.value = avail == ServerAvailability.Online
             }
         }
+        // Каталог может измениться (синк) — пересчитываем набор готовых первых глав.
+        viewModelScope.launch {
+            allBooks.collect { books -> refreshFirstChapterReady(books) }
+        }
+        // Файлы первой главы появляются при скачивании «на лету» при прослушивании,
+        // а не при синке каталога — опрашиваем диск периодически, пока экран жив.
+        viewModelScope.launch {
+            while (true) {
+                delay(FIRST_CHAPTER_POLL_MS)
+                refreshFirstChapterReady(allBooks.value)
+            }
+        }
         refresh()
+    }
+
+    /** Пересчитывает набор книг с готовой первой главой (лёгкая проверка файлов). */
+    private fun refreshFirstChapterReady(books: List<BookEntity>) {
+        val readyIds = books
+            .asSequence()
+            .filter { storage.isFirstChapterReady(it.id) }
+            .map { it.id }
+            .toSet()
+        _firstChapterReadyIds.value = readyIds
     }
 
     fun refresh() {
@@ -201,6 +234,11 @@ class CatalogViewModel(application: Application) : ViewModel() {
             }
             .distinctBy { it.id }
             .sortedBy { it.title.lowercase() }
+
+    companion object {
+        /** Период опроса диска на предмет появления первой главы книги. */
+        private const val FIRST_CHAPTER_POLL_MS = 2_000L
+    }
 }
 
 /** Рубрики книги хранятся в кэше одной строкой, разделённой переводами строк. */
