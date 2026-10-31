@@ -3,9 +3,7 @@
 
 Две задачи:
   - sync_catalog   — обход rutor.info, наполнение каталога;
-  - poll_downloads — синхронизация состояния торрентов с БД
-                     (создание глав, обновление прогресса,
-                     обработка удалённых торрентов).
+  - poll_downloads — синхронизация состояния торрентов с БД.
 
 Каждая задача — экземпляр Job (app.scheduler.base).
 """
@@ -18,10 +16,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.catalog.covers import CoverService
-from app.catalog.ingest import CatalogScanJob
 from app.config import settings
+from app.scheduler.catalog_scan_job import CatalogScanJob
+from app.scheduler.poll_downloads_job import PollDownloadsJob
 from app.scraper.rutor import RutorSource
-from app.torrents.poller import poll_downloads
 
 log = logging.getLogger(__name__)
 
@@ -73,10 +71,11 @@ def build_scheduler(covers: CoverService) -> AsyncIOScheduler:
     log.info(">>> build_scheduler: первый запуск poll_downloads в %s",
              poll_first_run)
 
+    poll_job = PollDownloadsJob(covers)
+
     scheduler.add_job(
-        poll_downloads,
+        poll_job.execute,
         trigger=IntervalTrigger(seconds=settings.TRANSMISSION_POLL_SEC),
-        args=[covers],
         id="poll_downloads",
         max_instances=1,
         coalesce=True,

@@ -99,9 +99,7 @@ def sync_chapter_status(chapter: Chapter, db: Session) -> Chapter:
     'ready'. Поллер обновляет статусы раз в несколько секунд, и плеер (или
     очередь докачки) может стучаться в эндпоинт раньше, чем поллер заметит
     завершение файла. Здесь мы не ждём следующего прохода поллера, а сразу
-    выполняем ровно те же действия, что и проход поллера, — вызываем общую
-    актуализацию раздачи actualize_release() (догон статусов глав +
-    приведение приоритетов всей раздачи к целевой схеме).
+    актуализируем статусы DownloadFile через торрент-клиент.
 
     Возвращает (возможно, обновлённый) chapter.
     """
@@ -113,10 +111,14 @@ def sync_chapter_status(chapter: Chapter, db: Session) -> Chapter:
         return chapter
 
     try:
-        from app.torrents.poller import actualize_release
+        from app.torrents import manager
+
+        files = manager.get_files(release.torrent_hash)
+        if not files:
+            return chapter
 
         was_status = chapter.status
-        changed = actualize_release(db, release.torrent_hash, release)
+        changed = release.actualize_download_files(files)
 
         if changed:
             db.commit()

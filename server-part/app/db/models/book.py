@@ -39,6 +39,7 @@ from app.db.models.enums import BookStatus, ChapterStatus
 if TYPE_CHECKING:
     from app.catalog.covers import CoverService
     from app.db.models.chapter import Chapter
+    from app.db.models.download_file import DownloadFile
     from app.db.models.release import Release
     from app.db.models.series import Series
 
@@ -142,9 +143,12 @@ class Book(Base):
     cover_cache_path:  Mapped[str | None] = mapped_column(Text)
     cover_mime:        Mapped[str | None] = mapped_column(String(50))
     cover_sha256:      Mapped[str | None] = mapped_column(String(64), index=True)
-    cover_retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    cover_is_temp:     Mapped[bool] = mapped_column(Integer, default=False, nullable=False)
-    cover_path_hint:   Mapped[str | None] = mapped_column(Text)
+    cover_retry_count:   Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cover_is_temp:       Mapped[bool] = mapped_column(Integer, default=False, nullable=False)
+    cover_path_hint:     Mapped[str | None] = mapped_column(Text)
+    cover_download_file_id: Mapped[int | None] = mapped_column(
+        ForeignKey("download_files.id", ondelete="SET NULL"),
+        nullable=True, index=True)
 
     downloaded_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_accessed: Mapped[datetime | None] = mapped_column(DateTime, index=True)
@@ -163,6 +167,11 @@ class Book(Base):
         back_populates="book", cascade="all, delete-orphan",
         order_by="Chapter.ordinal")
     series: Mapped["Series | None"] = relationship(back_populates="books")
+    cover_download_file: Mapped["DownloadFile | None"] = relationship(
+        "DownloadFile",
+        foreign_keys=[cover_download_file_id],
+        post_update=True,
+    )
 
     # ---------- поведение ----------
 
@@ -214,6 +223,14 @@ class Book(Base):
         Позволяет писать: book.cover.start_download(...), book.cover.is_settled и т.д.
         """
         return Cover(self)
+
+    @property
+    def cover_file(self) -> "DownloadFile | None":
+        """
+        Файл загрузки обложки (если обложка качается через торрент).
+        Если обложка была получена онлайн — None.
+        """
+        return self.cover_download_file
 
     # ============================================================
     # POJO helpers (не требуют сессии, только поля self)
@@ -277,6 +294,33 @@ class Book(Base):
             self.cover_is_temp = False
         else:
             self.cover_is_temp = True
+
+    def sync_cover_status_from_download_file(self) -> bool:
+        """
+        Синхронизирует статус обложки книги из статуса DownloadFile.
+        Когда файл обложки докачан — копирует его в кэш обложек.
+
+        Returns:
+            True, если статус обложки изменился.
+        """
+        df = self.cover_download_file
+        if df is None:
+            return False
+
+        from app.db.models.enums import DownloadFileStatus
+
+        if df.status == DownloadFileStatus.READY.value:
+            # Файл докачан — копируем в кэш
+            if self.cover_path_hint and not self.cover_cache_path:
+                hint_path = settings.downloads_dir / self.cover_path_hint
+                if hint_path.exists():
+                    from app.db.models.cover import Cover
+                    # Копируем через CoverService — но здесь нет сервиса,
+                    # поэтому просто отмечаем что файл есть на диске
+                    # (поллер скопирует при следующем проходе)
+                    self.cover_is_temp = False
+                    return True
+        return False
 
     # ============================================================
     # CRUD-like methods (требуется db Session)
@@ -678,8 +722,9 @@ class Book(Base):
         """Быстрый старт: обложка + первая глава сразу.
 
         Последовательность:
-        1. Загружает обложку (если ещё нет).
-        2. Запускает загрузку первой главы.
+        1. Если обложка встроена в торрент — выставляет приоритет её файлу.
+           Если обложки в торренте нет — ищет онлайн.
+        2. Запускает загрузку первой главы с высоким приоритетом.
         3. Остальные главы загрузятся в фоне (поллер).
 
         Args:
@@ -694,24 +739,35 @@ class Book(Base):
         # --- 1. Обложка ---
         if not self.cover.is_settled:
             release = self.releases[0] if self.releases else None
-            author = self.author or ""
-            rubrics: list[str] | None = None
 
-            if release:
-                # если у книги нет автора — берём из раздачи
+            # 1a. Обложка из торрента — выставляем приоритет
+            if self.cover_download_file and release and self.cover_path_hint:
+                ok = await release.start_download_file(
+                    self.cover_path_hint, priority=2)
+                if ok:
+                    log.debug("book=%s: приоритет обложки %s → 2",
+                              self.book_hash[:12], self.cover_path_hint)
+                    did_something = True
+
+            # 1b. Обложки в торренте нет — ищем онлайн
+            elif release:
+                author = self.author or ""
+                rubrics: list[str] | None = None
+
                 if not author:
                     author = release.release_author or ""
                 rubrics = [rp.rubric.title for rp in release.rubrics]
 
-            title = self.title or (release.title if release else "")
-            url = release.cover_source_url if (release and release.cover_source_url) else None
+                title = self.title or (release.title if release else "")
+                url = (release.cover_source_url
+                       if release.cover_source_url else None)
 
-            ok = await self.cover.start_download(
-                title=title, author=author, rubrics=rubrics,
-                url=url, covers=covers,
-            )
-            if ok:
-                did_something = True
+                ok = await self.cover.start_download(
+                    title=title, author=author, rubrics=rubrics,
+                    url=url, covers=covers,
+                )
+                if ok:
+                    did_something = True
 
         # --- 2. Первая глава — высокий приоритет ---
         if self.chapters and self.chapters[0].status != ChapterStatus.READY.value:

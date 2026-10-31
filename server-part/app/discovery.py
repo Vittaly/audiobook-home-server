@@ -161,7 +161,10 @@ class ServiceAnnouncer:
         # --- регистрация ---
         try:
             log.info(">>> mDNS: регистрируем сервис...")
-            await self._aiozc.async_register_service(self._info)
+            await self._aiozc.async_register_service(
+                self._info,
+                allow_name_change=True,
+            )
             log.info(">>> mDNS: сервис зарегистрирован")
         except Exception:
             log.exception(">>> mDNS: не удалось зарегистрировать сервис")

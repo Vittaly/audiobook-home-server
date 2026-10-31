@@ -43,6 +43,15 @@ class PersonRole(str, enum.Enum):
     ILLUSTRATOR = "illustrator"
 
 
+class DownloadFileStatus(str, enum.Enum):
+    """Статус файла загрузки внутри торрента."""
+    ABSENT      = "absent"
+    DOWNLOADING = "downloading"
+    PARTIAL     = "partial"
+    READY       = "ready"
+    ERROR       = "error"
+
+
 class RubricKind(str, enum.Enum):
     GENRE  = "genre"
     TAG    = "tag"

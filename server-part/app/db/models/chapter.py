@@ -9,6 +9,7 @@ from sqlalchemy import (
     Integer, String, Text, UniqueConstraint, func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.db.models.download_file import DownloadFile
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +47,10 @@ class Chapter(Base):
         ForeignKey("releases.id", ondelete="CASCADE"),
         nullable=True, index=True)
 
+    download_file_id: Mapped[int | None] = mapped_column(
+        ForeignKey("download_files.id", ondelete="SET NULL"),
+        nullable=True, index=True)
+
     ordinal:     Mapped[int] = mapped_column(Integer, nullable=False)
     file_index:  Mapped[int] = mapped_column(Integer, nullable=False)
     rel_path:    Mapped[str] = mapped_column(Text, nullable=False)
@@ -69,8 +74,23 @@ class Chapter(Base):
     last_modified_at: Mapped[datetime] = mapped_column(
         DateTime, default=func.now(), nullable=False)
 
-    book:    Mapped["Book"]    = relationship(back_populates="chapters")
-    release: Mapped["Release | None"] = relationship(back_populates="chapters")
+    book:         Mapped["Book"]            = relationship(back_populates="chapters")
+    release:      Mapped["Release | None"]  = relationship(back_populates="chapters")
+    download_file: Mapped["DownloadFile | None"] = relationship(
+        foreign_keys=[download_file_id],
+        post_update=True,
+    )
+
+    # ---------- file accessor ----------
+
+    @property
+    def file(self) -> "DownloadFile | None":
+        """
+        Файл загрузки этой главы.
+        Статус главы зависит от статуса файла загрузки, если он есть.
+        Если DownloadFile отсутствует (например, глава без торрента) — None.
+        """
+        return self.download_file
 
     # ---------- поведение ----------
 
@@ -93,6 +113,42 @@ class Chapter(Base):
 
         if self.book is not None:
             self.book.recompute_status()
+
+    def sync_status_from_download_file(self) -> bool:
+        """
+        Синхронизирует статус главы из статуса DownloadFile.
+        Вызывается после обновления файла загрузки.
+
+        Returns:
+            True, если статус главы изменился.
+        """
+        df = self.download_file
+        if df is None:
+            return False
+
+        from app.db.models.enums import ChapterStatus, DownloadFileStatus
+
+        # Маппинг статусов файла загрузки → статус главы
+        status_map = {
+            DownloadFileStatus.ABSENT.value: ChapterStatus.ABSENT.value,
+            DownloadFileStatus.DOWNLOADING.value: ChapterStatus.DOWNLOADING.value,
+            DownloadFileStatus.PARTIAL.value: ChapterStatus.PARTIAL.value,
+            DownloadFileStatus.READY.value: ChapterStatus.READY.value,
+            DownloadFileStatus.ERROR.value: ChapterStatus.ERROR.value,
+        }
+
+        target_status = status_map.get(df.status)
+        if target_status is None or target_status == self.status:
+            return False
+
+        self.set_status(
+            target_status,
+            progress=df.progress,
+            downloaded_bytes=df.downloaded_bytes,
+            pieces_have=df.pieces_have,
+            error_message=df.error_message,
+        )
+        return True
 
     def mark_ready(self) -> None:
         self.set_status(ChapterStatus.READY.value, progress=1.0)

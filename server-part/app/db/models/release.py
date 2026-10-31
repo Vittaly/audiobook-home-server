@@ -29,13 +29,14 @@ from app.config import settings
 from app.db.base import Base
 from app.db.models.book_release_link import book_release_link
 from app.db.models.cover import Cover
-from app.db.models.enums import BookStatus, ContentType
+from app.db.models.enums import BookStatus, ContentType, DownloadFileStatus
 from app.torrents import structure
 
 if TYPE_CHECKING:
     from app.catalog.covers import CoverService
-    from app.db.models.book import Book as BookModel
+    from app.db.models.book import Book
     from app.db.models.chapter import Chapter
+    from app.db.models.download_file import DownloadFile
     from app.db.models.person import ReleasePerson
     from app.db.models.rubric import ReleaseRubric
 
@@ -111,8 +112,8 @@ CheckConstraint(
     last_accessed: Mapped[datetime | None] = mapped_column(DateTime, index=True)
     last_seen_at:  Mapped[datetime | None] = mapped_column(DateTime)
 
-    # M:N связи
-    books: Mapped[list["BookModel"]] = relationship(
+    # связи
+    books: Mapped[list["Book"]] = relationship(
         secondary=book_release_link,
         back_populates="releases",
     )
@@ -120,6 +121,8 @@ CheckConstraint(
     persons:  Mapped[list["ReleasePerson"]] = relationship(
         back_populates="release", cascade="all, delete-orphan")
     rubrics:  Mapped[list["ReleaseRubric"]] = relationship(
+        back_populates="release", cascade="all, delete-orphan")
+    download_files: Mapped[list["DownloadFile"]] = relationship(
         back_populates="release", cascade="all, delete-orphan")
 
     # ================================================================
@@ -181,32 +184,42 @@ CheckConstraint(
                                    priority: int = 1) -> bool:
         """Добавляет торрент в клиент и выставляет приоритет конкретному файлу.
 
-        Ищем file_index по rel_path среди self.chapters, затем через
-        торрент-менеджер выставляем priority для этого файла.
+        Ищем file_index:
+          1. Среди self.chapters по rel_path (главы).
+          2. Если не нашли — среди файлов торрента из клиента (обложка).
 
         Args:
-            file_name: rel_path главы (из chapter.rel_path).
+            file_name: rel_path файла (chapter.rel_path или cover_path_hint).
             priority:  0=skip, 1=low, 2=normal, 3=high.
 
         Returns:
             True, если торрент добавлен и приоритет выставлен.
         """
-        # Ищем file_index среди глав раздачи
+        from app.torrents import manager as torrent_manager
+
+        # 1. Ищем file_index среди глав раздачи
         file_index = None
         for ch in self.chapters:
             if ch.rel_path == file_name:
                 file_index = ch.file_index
                 break
 
+        # 2. Если не глава — возможно файл обложки, ищем в торрент-клиенте
         if file_index is None:
-            log.warning("release=%s: файл %s не найден среди глав",
+            torrent = torrent_manager.get_torrent(self.torrent_hash)
+            if torrent is not None:
+                files = torrent_manager.get_files(self.torrent_hash)
+                for f in files:
+                    if f.name == file_name or f.name.endswith("/" + file_name):
+                        file_index = f.index
+                        break
+
+        if file_index is None:
+            log.warning("release=%s: файл %s не найден среди глав или файлов торрента",
                         self.id, file_name)
             return False
 
         # Убеждаемся, что торрент в клиенте
-        from pathlib import Path
-        from app.torrents import manager as torrent_manager
-
         torrent = torrent_manager.get_torrent(self.torrent_hash)
         if torrent is None:
             client_id = await self.start_download()
@@ -231,6 +244,135 @@ CheckConstraint(
             log.exception("release=%s: ошибка установки приоритета файла %s",
                           self.id, file_name)
             return False
+
+    # ================================================================
+    # АКТУАЛИЗАЦИЯ ФАЙЛОВ ЗАГРУЗКИ (DownloadFile)
+    # ================================================================
+
+    def actualize_download_files(self, files_from_client: list) -> bool:
+        """
+        Актуализирует статусы файлов загрузки по данным торрент-клиента.
+
+        Поллер передаёт перечень файлов из клиента (с их статусами).
+        Релиз по именам файлов определяет свои DownloadFile объекты,
+        обновляет их статусы и каскадно актуализирует связанные
+        объекты (главы → книги, обложки → книги).
+
+        Args:
+            files_from_client: список объектов с атрибутами:
+                .name (str) — имя файла (rel_path),
+                .progress (float),
+                .is_complete (bool),
+                .downloaded_bytes (int, опционально),
+                .pieces_total (int, опционально),
+                .pieces_have (int, опционально).
+
+        Returns:
+            True, если хотя бы один статус изменился.
+        """
+        changed = False
+
+        # Индексируем DownloadFile по file_name для быстрого поиска
+        df_by_name: dict[str, DownloadFile] = {}
+        for df in self.download_files:
+            df_by_name[df.file_name] = df
+
+        for f in files_from_client:
+            df = df_by_name.get(f.name)
+            if df is None:
+                continue
+
+            # Обновляем статус DownloadFile по данным клиента
+            if df.sync_from_torrent(
+                progress=f.progress,
+                is_complete=f.is_complete,
+                downloaded_bytes=getattr(f, 'downloaded_bytes', None),
+                pieces_total=getattr(f, 'pieces_total', None),
+                pieces_have=getattr(f, 'pieces_have', None),
+            ):
+                changed = True
+                # Каскад: обновляем статус связанной главы
+                self._cascade_from_download_file(df)
+
+        return changed
+
+    def mark_all_download_files_absent(self) -> bool:
+        """
+        Устанавливает всем DownloadFile раздачи статус ABSENT.
+
+        Вызывается из поллера, когда торрент пропал из клиента.
+        Каскадно обновляет статусы связанных глав и книг.
+
+        Returns:
+            True, если хотя бы один статус изменился.
+        """
+        from app.db.models.enums import DownloadFileStatus
+
+        changed = False
+        for df in self.download_files:
+            if df.status != DownloadFileStatus.ABSENT.value:
+                df.status = DownloadFileStatus.ABSENT.value
+                df.progress = 0.0
+                df.downloaded_bytes = 0
+                df.error_message = None
+                changed = True
+                self._cascade_from_download_file(df)
+
+        return changed
+
+    def _cascade_from_download_file(self, df: "DownloadFile") -> None:
+        """
+        Каскадно обновляет статусы объектов, связанных с DownloadFile.
+        """
+        from app.db.models.enums import DownloadFileStatus
+
+        # --- Поиск главы, связанной с этим файлом ---
+        for chapter in self.chapters:
+            if chapter.download_file_id == df.id:
+                if chapter.sync_status_from_download_file():
+                    log.debug(
+                        "chapter=%s: статус обновлён из download_file %s → %s",
+                        chapter.id, df.file_name, chapter.status)
+                return
+
+        # --- Поиск книги, у которой это файл обложки ---
+        for book in self.books:
+            if book.cover_download_file_id == df.id:
+                if book.sync_cover_status_from_download_file():
+                    log.debug(
+                        "book=%s: обложка обновлена из download_file %s → %s",
+                        book.book_hash[:12], df.file_name, df.status)
+                return
+
+    def find_or_create_download_file(self, db: Session, file_name: str,
+                                      size_bytes: int = 0) -> "DownloadFile":
+        """
+        Находит или создаёт DownloadFile для указанного файла в раздаче.
+
+        Args:
+            db: сессия БД.
+            file_name: имя файла (rel_path) внутри торрента.
+            size_bytes: размер файла.
+
+        Returns:
+            Существующий или новый DownloadFile (уже добавлен в сессию).
+        """
+        from app.db.models.download_file import DownloadFile
+
+        for df in self.download_files:
+            if df.file_name == file_name:
+                return df
+
+        df = DownloadFile(
+            release_id=self.id,
+            file_name=file_name,
+            size_bytes=size_bytes,
+            status=DownloadFileStatus.ABSENT.value,
+        )
+        db.add(df)
+        db.flush()
+        self.download_files.append(df)
+        return df
 
     # ================================================================
     # ПОВЕДЕНИЕ
@@ -454,6 +596,19 @@ CheckConstraint(
             created += book.ingest_chapters(self, group)
             book.detect_series(db, self, group)
 
+            # Создаём DownloadFile для каждой главы этой книги
+            for chapter in book.chapters:
+                if chapter.release_id == self.id and chapter.download_file_id is None:
+                    df = self.find_or_create_download_file(
+                        db, chapter.rel_path, chapter.size_bytes)
+                    chapter.download_file_id = df.id
+
+            # Создаём DownloadFile для обложки тома, если есть hint
+            cover_rel = group.get("cover")
+            if cover_rel and book.cover_download_file_id is None:
+                df = self.find_or_create_download_file(db, cover_rel, 0)
+                book.cover_download_file_id = df.id
+
         # удаляем «книги-заглушки», оставшиеся без глав
         live_books = [b for b in self.books if b.chapters]
         stale_books = [b for b in self.books if not b.chapters]
@@ -471,7 +626,7 @@ CheckConstraint(
         return created
 
     def _upsert_book_from_group(self, db: Session, group: dict,
-                                covers: "CoverService") -> "BookModel | None":
+                                covers: "CoverService") -> "Book | None":
         """Находит или создаёт книгу раздачи по folder, заполняет поля и обложку."""
         from app.db.models.book import Book, compute_book_hash
 

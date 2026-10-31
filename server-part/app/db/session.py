@@ -25,6 +25,7 @@ from typing import Iterator
 
 from sqlalchemy import create_engine, event as sa_event
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from app.config import settings
 from app.db import models  # noqa: F401  — регистрация таблиц в Base.metadata
@@ -41,6 +42,7 @@ engine = create_engine(
     settings.db_url,
     echo=False,
     future=True,
+    poolclass=NullPool,
     connect_args={
         "check_same_thread": False,
         "timeout": 30,
@@ -63,6 +65,34 @@ def _set_sqlite_pragma(dbapi_conn, _):
         ) from exc
     cur.execute("PRAGMA synchronous=NORMAL")
     cur.close()
+
+
+# ===================================================================
+# RETRY ПРИ SQLite BUSY
+# ===================================================================
+
+
+def _run_with_retry(fn, max_retries: int = 3, delay: float = 0.5):
+    """Повторяет вызов fn при OperationalError 'database is locked'.
+
+    SQLite позволяет только один writer за раз.  Если поллер и сканер
+    одновременно пишут — WAL и busy_timeout не всегда спасают.
+    Этот декоратор ловит transient-ошибку и повторяет commit.
+    """
+    import sqlite3
+    import time
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            if "database is locked" not in str(e):
+                raise
+            if attempt == max_retries - 1:
+                raise
+            log.warning("SQLite busy, retry %d/%d после %.1fs",
+                        attempt + 1, max_retries, delay)
+            time.sleep(delay)
+    return None  # unreachable, но для типа
 
 
 # ===================================================================
@@ -152,7 +182,7 @@ class SessionManager:
         db = self.get()
         try:
             yield db
-            db.commit()
+            _run_with_retry(db.commit)
         except Exception:
             db.rollback()
             log.exception("SessionManager: откат транзакции")
@@ -223,10 +253,9 @@ def migrate_legacy_schema() -> None:
 
 
 def init_db() -> None:
-    """Создаёт таблицы БД и запускает миграции схемы.
+    """Создаёт таблицы БД.
 
     Вызывается однократно при старте сервера.
     """
     Base.metadata.create_all(bind=engine)
-    migrate_legacy_schema()
     log.info("БД инициализирована")

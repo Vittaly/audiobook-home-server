@@ -62,11 +62,14 @@ def setup_logging() -> None:
     file_handler.setLevel(level)
     root.addHandler(file_handler)
 
-    # --- консоль ---
-    console = logging.StreamHandler(sys.stdout)
-    console.setFormatter(formatter)
-    console.setLevel(level)
-    root.addHandler(console)
+    # --- консоль (только если stdout — терминал, не файл) ---
+    # При запуске через manage.sh: nohup ... >>app.log 2>&1
+    # StreamHandler + RotatingFileHandler → в файл пишется дважды.
+    if sys.stdout.isatty():
+        console = logging.StreamHandler(sys.stdout)
+        console.setFormatter(formatter)
+        console.setLevel(level)
+        root.addHandler(console)
 
     # --- приглушение шумных логгеров ---
     for name in QUIET_LOGGERS:

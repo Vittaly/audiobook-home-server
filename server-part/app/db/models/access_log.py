@@ -23,7 +23,7 @@ class AccessLog(Base):
     book_hash:   Mapped[str] = mapped_column(
         ForeignKey("books.book_hash", ondelete="CASCADE"), nullable=False, index=True)
     chapter_id:  Mapped[int | None] = mapped_column(
-        ForeignKey("chapter.id", ondelete="SET NULL"))
+        ForeignKey("chapters.id", ondelete="SET NULL"))
     action:      Mapped[str] = mapped_column(String(20), nullable=False)
     client_ip:   Mapped[str | None] = mapped_column(String(45))
     user_agent:  Mapped[str | None] = mapped_column(String(255))
